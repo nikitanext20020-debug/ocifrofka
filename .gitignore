@@ -17,6 +17,9 @@
 /.next/
 /out/
 
+# local git worktrees
+/.worktrees/
+
 # production
 /build
 
