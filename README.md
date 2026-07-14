@@ -41,7 +41,7 @@ npm run build
 - DeepSeek: `https://api.deepseek.com`
 - xAI: `https://api.x.ai/v1`
 
-По умолчанию vision-агент использует `cx/gpt-5.5-review`, Excel-агент — `deepseek/deepseek-v4-flash`.
+По умолчанию vision-агент использует `cx/gpt-5.5-review`, Excel-агент — `deepseek/deepseek-v4-flash`. В настройках распознавания можно сохранить несколько API-агентов с разными ключами и моделями, выбрать один активный перед запуском и удалить ненужные.
 
 ## Ключи и данные
 
