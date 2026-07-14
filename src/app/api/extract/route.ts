@@ -3,6 +3,7 @@ import { apiError, callStructured, readAgentConfig } from "@/lib/model-client";
 import { extractedRecordResponseSchema } from "@/lib/schemas";
 
 export const runtime = "nodejs";
+export const maxDuration = 120;
 
 const requestSchema = z.object({
   image: z.string().startsWith("data:image/").max(12_000_000),

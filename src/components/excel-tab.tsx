@@ -37,7 +37,21 @@ import {
 import { agentHeaders, clone, cn, readApiResponse } from "@/lib/utils";
 import { Button, Card, EmptyState, SectionTitle } from "@/components/ui";
 
-const BATCH_SIZE = 100;
+const BATCH_SIZE = 30;
+const PARALLEL_REQUESTS = 3;
+
+async function runBatches<T>(tasks: Array<() => Promise<T[]>>) {
+  const results: T[] = [];
+  const errors: Error[] = [];
+  for (let i = 0; i < tasks.length; i += PARALLEL_REQUESTS) {
+    const settled = await Promise.allSettled(tasks.slice(i, i + PARALLEL_REQUESTS).map((task) => task()));
+    for (const outcome of settled) {
+      if (outcome.status === "fulfilled") results.push(...outcome.value);
+      else errors.push(outcome.reason instanceof Error ? outcome.reason : new Error(String(outcome.reason)));
+    }
+  }
+  return { results, errors };
+}
 
 type BusyAction = "load" | "analyze" | "insert" | "gaps" | "custom" | null;
 
@@ -243,32 +257,40 @@ export function ExcelTab({
       }
       const examples = table.rows
         .filter((row) => Object.values(analysis.mapping).every((column) => column === null || String(row[column] ?? "").trim()))
-        .slice(0, 30);
+        .slice(0, 10);
       const groupedRows = [...new Set(gaps.map(({ row }) => row))];
-      const changes: CellChange[] = [];
+      const tasks: Array<() => Promise<CellChange[]>> = [];
       for (let start = 0; start < groupedRows.length; start += BATCH_SIZE) {
         const rowIndexes = groupedRows.slice(start, start + BATCH_SIZE);
         const rowSet = new Set(rowIndexes);
         const batchGaps = gaps.filter(({ row }) => rowSet.has(row));
-        const result = await readApiResponse<{ changes: CellChange[] }>(
-          await fetch("/api/table/fill-gaps", {
-            method: "POST",
-            headers: agentHeaders(settings.table),
-            body: JSON.stringify({
-              headers: table.headers,
-              rows: rowIndexes.map((row) => ({ row, values: table.rows[row] })),
-              gaps: batchGaps,
-              examples,
-              formats: analysis.formats,
-              categoricals: columnCategoricals,
+        tasks.push(async () => {
+          const result = await readApiResponse<{ changes: CellChange[] }>(
+            await fetch("/api/table/fill-gaps", {
+              method: "POST",
+              headers: agentHeaders(settings.table),
+              body: JSON.stringify({
+                headers: table.headers,
+                rows: rowIndexes.map((row) => ({ row, values: table.rows[row] })),
+                gaps: batchGaps,
+                examples,
+                formats: analysis.formats,
+                categoricals: columnCategoricals,
+              }),
             }),
-          }),
-        );
-        changes.push(...result.changes);
+          );
+          return result.changes;
+        });
       }
+      const { results: changes, errors } = await runBatches(tasks);
       const allowed = new Set(gaps.map(({ row, column }) => `${row}:${column}`));
       const applied = applyCellChanges(table.rows, changes, allowed);
-      if (!applied.applied.length) throw new Error("Модель не предложила значений для пропусков");
+      if (!applied.applied.length) {
+        throw errors[0] ?? new Error("Модель не предложила значений для пропусков");
+      }
+      if (errors.length) {
+        toast.warning(`Часть батчей не обработана (${errors.length}). Нажмите «Дополнить пропуски» ещё раз для оставшихся ячеек.`);
+      }
       pushSnapshot();
       replaceActiveRows(applied.rows);
       setMarks(Object.fromEntries(applied.applied.map(({ row, column }) => [`${row}:${column}`, "generated"] as const)));
@@ -286,17 +308,24 @@ export function ExcelTab({
     if (!table || !analysis || instruction.trim().length < 3) return;
     setBusy("custom");
     try {
-      const changes: CellChange[] = [];
+      const tasks: Array<() => Promise<CellChange[]>> = [];
       for (let start = 0; start < table.rows.length; start += BATCH_SIZE) {
         const rows = table.rows.slice(start, start + BATCH_SIZE).map((values, index) => ({ row: start + index, values }));
-        const result = await readApiResponse<{ changes: CellChange[] }>(
-          await fetch("/api/table/custom", {
-            method: "POST",
-            headers: agentHeaders(settings.table),
-            body: JSON.stringify({ instruction: instruction.trim(), headers: table.headers, rows }),
-          }),
-        );
-        changes.push(...result.changes);
+        tasks.push(async () => {
+          const result = await readApiResponse<{ changes: CellChange[] }>(
+            await fetch("/api/table/custom", {
+              method: "POST",
+              headers: agentHeaders(settings.table),
+              body: JSON.stringify({ instruction: instruction.trim(), headers: table.headers, rows }),
+            }),
+          );
+          return result.changes;
+        });
+      }
+      const { results: changes, errors } = await runBatches(tasks);
+      if (errors.length && !changes.length) throw errors[0];
+      if (errors.length) {
+        toast.warning(`Часть батчей не обработана (${errors.length}). Запустите инструкцию повторно.`);
       }
       const applied = applyCellChanges(table.rows, changes);
       if (!applied.applied.length) {
