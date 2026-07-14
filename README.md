@@ -1,36 +1,55 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Оцифровка обращений
 
-## Getting Started
+Веб-приложение на Next.js для распознавания заявлений по фото/PDF и переноса структурированных данных в Excel. Интерфейс и сообщения об ошибках — на русском языке.
 
-First, run the development server:
+## Возможности
+
+- Загрузка JPG, PNG, WebP и PDF до 20 МБ; PDF рендерится в браузере через pdfjs-dist.
+- Последовательное vision-распознавание с редактируемой сессией и экспортом JSON/CSV.
+- Импорт XLSX, XLS и CSV, выбор листа, просмотр и скачивание результата.
+- ИИ-анализ колонок, нормализация новых записей, заполнение пропусков и произвольные инструкции.
+- Модель возвращает только точечные изменения, которые валидируются и применяются приложением.
+- История изменений и отмена последнего действия.
+
+## Локальный запуск
+
+Требуется Node.js 20.9 или новее.
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Откройте `http://localhost:3000`, перейдите в «Настройки» и укажите ключи провайдеров.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Проверка
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run lint
+npm run typecheck
+npm test
+npm run build
+```
 
-## Learn More
+## Провайдеры
 
-To learn more about Next.js, take a look at the following resources:
+Приложение использует OpenAI-совместимый endpoint `chat/completions` с JSON mode. В интерфейсе доступны пресеты:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- AnyModel: `https://anymodel.org/v1/`
+- RouterAI: `https://routerai.ru/api/v1`
+- OpenAI: `https://api.openai.com/v1`
+- DeepSeek: `https://api.deepseek.com`
+- xAI: `https://api.x.ai/v1`
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+По умолчанию vision-агент использует `cx/gpt-5.5-review`, Excel-агент — `deepseek/deepseek-v4-flash`.
 
-## Deploy on Vercel
+## Ключи и данные
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+API-ключи и настройки сохраняются только в localStorage браузера. Ключ передаётся в собственный Route Handler в заголовке запроса, используется для одного серверного запроса провайдеру и не записывается в логи или постоянное хранилище. Настраиваемый `base_url` должен быть публичным HTTPS-адресом; локальные и приватные адреса блокируются.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Изображения отправляются через серверный `/api/extract`. Таблицы целиком на сервере не сохраняются. Для табличных операций агент возвращает JSON со списком изменений, а применение выполняется в браузере.
+
+## Деплой на Vercel
+
+Импортируйте каталог как Next.js-проект в Vercel. Переменные окружения не требуются: пользователи вводят API-ключи в браузере. Для крупных изображений приложение выполняет клиентское сжатие; у выбранного тарифа Vercel также должны быть достаточные лимиты тела запроса и времени выполнения функции.
+"# ocifrofka" 
