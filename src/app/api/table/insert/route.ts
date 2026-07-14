@@ -3,6 +3,7 @@ import { apiError, callStructured, readAgentConfig } from "@/lib/model-client";
 import { normalizedRecordsSchema } from "@/lib/schemas";
 
 export const runtime = "nodejs";
+export const maxDuration = 120;
 
 const recordSchema = z.object({
   topic: z.string(),

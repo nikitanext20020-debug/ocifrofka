@@ -3,6 +3,7 @@ import { apiError, callStructured, readAgentConfig } from "@/lib/model-client";
 import { cellChangesSchema } from "@/lib/schemas";
 
 export const runtime = "nodejs";
+export const maxDuration = 120;
 
 const bodySchema = z.object({
   instruction: z.string().min(3).max(3000),
