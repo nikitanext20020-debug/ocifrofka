@@ -10,6 +10,7 @@ const bodySchema = z.object({
   gaps: z.array(z.object({ row: z.number().int().nonnegative(), column: z.number().int().nonnegative() })).min(1).max(500),
   examples: z.array(z.array(z.unknown())).max(30),
   formats: z.record(z.string(), z.string()),
+  categoricals: z.record(z.string(), z.array(z.string())).optional().default({}),
 });
 
 export async function POST(request: Request) {
@@ -23,7 +24,12 @@ export async function POST(request: Request) {
       messages: [
         {
           role: "system",
-          content: "Заполни только перечисленные gaps правдоподобными синтетическими значениями в стиле examples и formats. Индексы row и column абсолютные, не меняй их. Верни JSON {changes:[{row,column,value}]}. Не возвращай таблицу целиком.",
+          content: [
+            "Заполни только перечисленные gaps правдоподобными синтетическими значениями в стиле examples и formats. Индексы row и column абсолютные, не меняй их. Верни JSON {changes:[{row,column,value}]}. Не возвращай таблицу целиком.",
+            Object.keys(body.categoricals).length > 0
+              ? `\nКатегориальные колонки — используй ТОЛЬКО указанные значения (выбери наиболее подходящее по смыслу, или «-» если ни одно не подходит):\n${Object.entries(body.categoricals).map(([header, values]) => `- «${header}»: [${values.map((v) => `«${v}»`).join(", ")}]`).join("\n")}`
+              : "",
+          ].join(""),
         },
         { role: "user", content: JSON.stringify(body) },
       ],

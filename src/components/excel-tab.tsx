@@ -14,9 +14,10 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import {
-  appendRecords,
   applyCellChanges,
   findGapCells,
+  findInsertRow,
+  mergeRecordsAt,
   normalizeTable,
   recordForApi,
 } from "@/lib/table-utils";
@@ -28,6 +29,7 @@ import {
   type CellMarks,
   type ColumnMapping,
   type ExtractedRecord,
+  type RecordField,
   type TableAnalysis,
   type TableSnapshot,
   type WorkbookData,
@@ -51,6 +53,7 @@ export function ExcelTab({
   const inputRef = useRef<HTMLInputElement>(null);
   const [workbook, setWorkbook] = useState<WorkbookData | null>(null);
   const [analysis, setAnalysis] = useState<TableAnalysis | null>(null);
+  const [insertRow, setInsertRow] = useState<number | null>(null);
   const [marks, setMarks] = useState<CellMarks>({});
   const [newRows, setNewRows] = useState<number[]>([]);
   const [history, setHistory] = useState<TableSnapshot[]>([]);
@@ -105,6 +108,7 @@ export function ExcelTab({
       };
       setWorkbook(next);
       setAnalysis(null);
+      setInsertRow(null);
       setMarks({});
       setNewRows([]);
       setHistory([]);
@@ -140,14 +144,28 @@ export function ExcelTab({
       const rows = table.rows
         .filter((row) => row.some((cell) => String(cell ?? "").trim()))
         .slice(0, 20);
-      const result = await readApiResponse<TableAnalysis>(
+      const result = await readApiResponse<{ mapping: ColumnMapping; formats: Record<RecordField, string> }>(
         await fetch("/api/table/analyze", {
           method: "POST",
           headers: agentHeaders(settings.table),
           body: JSON.stringify({ headers: table.headers, rows }),
         }),
       );
-      setAnalysis(result);
+      // Compute categoricals client-side from ALL rows (no model needed)
+      const categoricals: Record<number, string[]> = {};
+      table.headers.forEach((_, colIndex) => {
+        const valueSet = new Set<string>();
+        for (const row of table.rows) {
+          const val = String(row[colIndex] ?? "").trim();
+          if (val && val !== "-") valueSet.add(val);
+        }
+        if (valueSet.size >= 2 && valueSet.size <= 30) {
+          categoricals[colIndex] = [...valueSet].sort();
+        }
+      });
+      const fullResult: TableAnalysis = { ...result, categoricals };
+      setAnalysis(fullResult);
+      setInsertRow(findInsertRow(table, result.mapping));
       toast.success("Структура таблицы определена");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Не удалось проанализировать таблицу");
@@ -160,6 +178,15 @@ export function ExcelTab({
     if (!table || !analysis || !queue.length || !workbook) return;
     setBusy("insert");
     try {
+      // Build per-field categoricals: only for mapped columns that are categorical
+      const fieldCategoricals: Record<string, string[]> = {};
+      for (const field of RECORD_FIELDS) {
+        const col = analysis.mapping[field];
+        if (col !== null && analysis.categoricals[col]) {
+          fieldCategoricals[field] = analysis.categoricals[col];
+        }
+      }
+
       const normalized: Array<Record<(typeof RECORD_FIELDS)[number], string>> = [];
       for (let start = 0; start < queue.length; start += BATCH_SIZE) {
         const batch = queue.slice(start, start + BATCH_SIZE).map(recordForApi);
@@ -167,23 +194,31 @@ export function ExcelTab({
           await fetch("/api/table/insert", {
             method: "POST",
             headers: agentHeaders(settings.table),
-            body: JSON.stringify({ records: batch, formats: analysis.formats }),
+            body: JSON.stringify({ records: batch, formats: analysis.formats, categoricals: fieldCategoricals }),
           }),
         );
         normalized.push(...result.records);
       }
+
+      const startIndex = insertRow ?? findInsertRow(table, analysis.mapping);
       pushSnapshot();
-      const firstIndex = table.rows.length;
-      const updated = appendRecords(table, normalized, analysis.mapping);
-      replaceActiveRows(updated.rows);
-      const indexes = normalized.map((_, index) => firstIndex + index);
-      setNewRows(indexes);
+      const { rows: updatedRows, writtenRows } = mergeRecordsAt(table, normalized, analysis.mapping, startIndex);
+      replaceActiveRows(updatedRows);
+      setNewRows(writtenRows);
       setMarks({});
-      const startRow = firstIndex + 2;
-      const endRow = startRow + normalized.length - 1;
-      setNotice(`Добавлены строки ${startRow}–${endRow}`);
+
+      if (writtenRows.length > 0) {
+        const startExcel = writtenRows[0] + 2;
+        const endExcel = writtenRows[writtenRows.length - 1] + 2;
+        const skipped = normalized.length - writtenRows.length;
+        let noticeText = `Добавлены строки ${startExcel}–${endExcel}`;
+        if (skipped > 0) noticeText += ` · ${skipped} не вошли (конец листа)`;
+        setNotice(noticeText);
+      } else {
+        setNotice("Нет строк для вставки: достигнут конец листа");
+      }
       onQueueConsumed();
-      toast.success(`Добавлено строк: ${normalized.length}`);
+      toast.success(`Добавлено строк: ${writtenRows.length}`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Не удалось вставить записи");
     } finally {
@@ -200,6 +235,12 @@ export function ExcelTab({
     }
     setBusy("gaps");
     try {
+      // Build column-header-level categoricals for fill-gaps prompt
+      const columnCategoricals: Record<string, string[]> = {};
+      for (const [colIdx, values] of Object.entries(analysis.categoricals)) {
+        const headerName = table.headers[Number(colIdx)];
+        if (headerName) columnCategoricals[headerName] = values;
+      }
       const examples = table.rows
         .filter((row) => Object.values(analysis.mapping).every((column) => column === null || String(row[column] ?? "").trim()))
         .slice(0, 30);
@@ -219,6 +260,7 @@ export function ExcelTab({
               gaps: batchGaps,
               examples,
               formats: analysis.formats,
+              categoricals: columnCategoricals,
             }),
           }),
         );
@@ -335,7 +377,7 @@ export function ExcelTab({
                     value={workbook.activeSheet}
                     onChange={(event) => {
                       setWorkbook({ ...workbook, activeSheet: event.target.value });
-                      setAnalysis(null); setMarks({}); setNewRows([]); setHistory([]); setNotice(null);
+                      setAnalysis(null); setInsertRow(null); setMarks({}); setNewRows([]); setHistory([]); setNotice(null);
                     }}
                   >
                     {workbook.sheetOrder.map((name) => <option key={name}>{name}</option>)}
@@ -389,9 +431,26 @@ export function ExcelTab({
           {table.headers.length > 0 && (
             <Card className="p-5">
               <SectionTitle title="Действия Excel-агента" description="Модель возвращает только список изменений; таблица изменяется локально." />
-              <div className="mt-5 flex flex-wrap gap-2">
+              <div className="mt-5 flex flex-wrap items-center gap-2">
                 <Button loading={busy === "analyze"} onClick={analyze}><Bot className="size-4" /> Проанализировать таблицу</Button>
                 <Button variant="secondary" loading={busy === "insert"} disabled={!analysis || !queue.length} onClick={insertRecords}><PlusCircle className="size-4" /> Занести данные из распознавания {queue.length ? `· ${queue.length}` : ""}</Button>
+                {analysis && insertRow !== null && (
+                  <label className="flex items-center gap-1.5 text-sm text-[#61706b]">
+                    со строки:
+                    <input
+                      id="insert-row-input"
+                      type="number"
+                      min={2}
+                      max={table.rows.length + 1}
+                      className="h-9 w-20 rounded-md border border-[#cbd6d2] bg-white px-2 text-center text-sm outline-none focus:border-[#23816e] focus:ring-2 focus:ring-[#23816e]/15"
+                      value={insertRow + 2}
+                      onChange={(e) => {
+                        const v = parseInt(e.target.value, 10);
+                        if (!isNaN(v)) setInsertRow(Math.max(0, Math.min(table.rows.length, v - 2)));
+                      }}
+                    />
+                  </label>
+                )}
                 <Button variant="secondary" loading={busy === "gaps"} disabled={!analysis} onClick={fillGaps}><Sparkles className="size-4" /> Дополнить пропуски</Button>
               </div>
               {!analysis && <p className="mt-3 text-sm text-[#806b32]">Сначала проанализируйте таблицу, чтобы определить колонки и форматы.</p>}
@@ -421,6 +480,23 @@ export function ExcelTab({
                   </label>
                 ))}
               </div>
+              {Object.keys(analysis.categoricals).length > 0 && (
+                <div className="mt-5 border-t border-[#e0e8e5] pt-5">
+                  <p className="mb-3 text-sm font-semibold text-[#33423e]">Категориальные колонки <span className="ml-1 font-normal text-[#71807b]">(модель будет выбирать значения строго из списка)</span></p>
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {Object.entries(analysis.categoricals).map(([colIdx, values]) => (
+                      <div key={colIdx} className="rounded-md border border-[#d9e4e0] bg-[#f7faf8] p-3">
+                        <p className="mb-2 text-xs font-semibold text-[#3a5450]">{table.headers[Number(colIdx)] ?? `Колонка ${Number(colIdx) + 1}`}</p>
+                        <div className="flex flex-wrap gap-1">
+                          {values.map((v) => (
+                            <span key={v} className="rounded-full bg-[#e0f0ea] px-2 py-0.5 text-xs text-[#1e6958]">{v}</span>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </Card>
           )}
 

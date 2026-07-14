@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { appendRecords, applyCellChanges, normalizeTable, recordsToCsv } from "@/lib/table-utils";
-import type { ExtractedRecord } from "@/lib/types";
+import { appendRecords, applyCellChanges, findInsertRow, mergeRecordsAt, normalizeTable, recordsToCsv } from "@/lib/table-utils";
+import type { ColumnMapping, ExtractedRecord } from "@/lib/types";
 
 describe("normalizeTable", () => {
   it("creates stable names for empty headers and pads rows", () => {
@@ -55,5 +55,90 @@ describe("recordsToCsv", () => {
     expect(csv.startsWith("\uFEFF")).toBe(true);
     expect(csv).toContain('"Ремонт, крыши"');
     expect(csv).toContain('"Иванов ""Иван"""');
+  });
+});
+
+describe("findInsertRow", () => {
+  const mapping: ColumnMapping = {
+    topic: 3,
+    full_name: 1,
+    birth_date: null,
+    address: null,
+    phone: 2,
+  };
+
+  it("skips monotone service columns and finds the last real-data row", () => {
+    const table = {
+      headers: ["Округ", "ФИО", "Телефон", "Тема"],
+      rows: [
+        ["Богородский г.о.", "Иванов Иван", "8999", "Дорога"],
+        ["Богородский г.о.", "Петров Петр", "8888", "ЖКХ"],
+        ["Богородский г.о.", "", "", ""],
+        ["Богородский г.о.", "", "", ""],
+      ],
+    };
+    // Col 0 (Округ) is monotone (same value in every row).
+    // Last row with real data is index 1 → insert at index 2.
+    expect(findInsertRow(table, mapping)).toBe(2);
+  });
+
+  it("returns 0 when the table has no rows", () => {
+    expect(findInsertRow({ headers: ["ФИО"], rows: [] }, { topic: null, full_name: 0, birth_date: null, address: null, phone: null })).toBe(0);
+  });
+
+  it("returns 0 when all mapped columns are monotone", () => {
+    const table = {
+      headers: ["Статус"],
+      rows: [["Обработано"], ["Обработано"], ["Обработано"]],
+    };
+    expect(findInsertRow(table, { topic: 0, full_name: null, birth_date: null, address: null, phone: null })).toBe(0);
+  });
+});
+
+describe("mergeRecordsAt", () => {
+  const mapping: ColumnMapping = {
+    topic: 3,
+    full_name: 1,
+    birth_date: null,
+    address: null,
+    phone: 2,
+  };
+  const record = { topic: "Ремонт", full_name: "Сидоров Сидор", birth_date: "-", address: "-", phone: "8777" };
+
+  it("fills empty mapped cells and leaves existing values intact", () => {
+    const table = {
+      headers: ["Округ", "ФИО", "Телефон", "Тема"],
+      rows: [
+        ["Богородский г.о.", "Иванов", "8999", "Дорога"],
+        ["Богородский г.о.", "", "", ""],
+      ],
+    };
+    const { rows, writtenRows } = mergeRecordsAt(table, [record], mapping, 1);
+    expect(rows[1][0]).toBe("Богородский г.о."); // service column untouched
+    expect(rows[1][1]).toBe("Сидоров Сидор");
+    expect(rows[1][2]).toBe("8777");
+    expect(rows[1][3]).toBe("Ремонт");
+    expect(writtenRows).toEqual([1]);
+  });
+
+  it("does not overwrite an existing non-empty cell", () => {
+    const table = {
+      headers: ["Округ", "ФИО", "Телефон", "Тема"],
+      rows: [["Богородский г.о.", "Уже есть", "", ""]],
+    };
+    const { rows } = mergeRecordsAt(table, [record], mapping, 0);
+    expect(rows[0][1]).toBe("Уже есть"); // NOT overwritten
+  });
+
+  it("does not add rows beyond the table length", () => {
+    const table = { headers: ["ФИО"], rows: [] as unknown[][] };
+    const { rows, writtenRows } = mergeRecordsAt(
+      table,
+      [{ topic: "-", full_name: "Иванов", birth_date: "-", address: "-", phone: "-" }],
+      { topic: null, full_name: 0, birth_date: null, address: null, phone: null },
+      0,
+    );
+    expect(rows).toHaveLength(0);
+    expect(writtenRows).toHaveLength(0);
   });
 });

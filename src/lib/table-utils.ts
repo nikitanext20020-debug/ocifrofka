@@ -81,6 +81,79 @@ export function recordForApi(record: ExtractedRecord) {
   ) as Record<RecordField, string>;
 }
 
+/**
+ * Finds the first row index (0-based into table.rows) where new records should
+ * be inserted. Ignores «monotone» mapped columns — those where a single value
+ * covers ≥ 95% of non-empty rows (e.g. a district name stamped on every row).
+ * Returns the index right after the last row that has real data.
+ */
+export function findInsertRow(table: TableData, mapping: ColumnMapping): number {
+  const mappedColumns = Object.values(mapping).filter(
+    (col): col is number => col !== null,
+  );
+  if (!mappedColumns.length || !table.rows.length) return 0;
+
+  // Detect monotone columns: one value covers ≥ 95 % of non-empty rows
+  const monotoneColumns = new Set<number>();
+  for (const col of mappedColumns) {
+    const nonEmpty = table.rows
+      .map((row) => String(row[col] ?? "").trim())
+      .filter((v) => v !== "" && v !== "-");
+    if (nonEmpty.length < 2) continue;
+    const freq = new Map<string, number>();
+    for (const v of nonEmpty) freq.set(v, (freq.get(v) ?? 0) + 1);
+    const maxCount = Math.max(...freq.values());
+    if (maxCount / nonEmpty.length >= 0.95) monotoneColumns.add(col);
+  }
+
+  const activeCols = mappedColumns.filter((col) => !monotoneColumns.has(col));
+  if (!activeCols.length) return 0;
+
+  // Scan backwards for the last row that has data in any active mapped column
+  for (let i = table.rows.length - 1; i >= 0; i--) {
+    const row = table.rows[i];
+    const hasData = activeCols.some((col) => {
+      const v = String(row[col] ?? "").trim();
+      return v !== "" && v !== "-";
+    });
+    if (hasData) return i + 1;
+  }
+  return 0;
+}
+
+/**
+ * Writes records into existing rows starting at insertRowIndex, filling only
+ * empty cells in mapped columns (cells that already have a value are left
+ * intact). Never appends rows beyond the current table length.
+ * Returns the updated rows array and the list of row indices that were written.
+ */
+export function mergeRecordsAt(
+  table: TableData,
+  records: Array<Record<RecordField, string>>,
+  mapping: ColumnMapping,
+  insertRowIndex: number,
+): { rows: unknown[][]; writtenRows: number[] } {
+  const next = table.rows.map((row) => [...row]);
+  const writtenRows: number[] = [];
+
+  for (let i = 0; i < records.length; i++) {
+    const rowIndex = insertRowIndex + i;
+    if (rowIndex >= next.length) break; // do not add rows past the end
+    const record = records[i];
+    for (const field of RECORD_FIELDS) {
+      const col = mapping[field];
+      if (col === null || col >= (next[rowIndex]?.length ?? 0)) continue;
+      const existing = String(next[rowIndex][col] ?? "").trim();
+      if (!existing || existing === "-") {
+        next[rowIndex][col] = record[field];
+      }
+    }
+    writtenRows.push(rowIndex);
+  }
+
+  return { rows: next, writtenRows };
+}
+
 export function recordsToCsv(records: ExtractedRecord[]) {
   const headers = ["Тема", "ФИО", "Дата рождения", "Адрес", "Телефон", "Примечание"];
   const escape = (value: string) => `"${value.replaceAll('"', '""')}"`;

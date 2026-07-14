@@ -15,6 +15,7 @@ const recordSchema = z.object({
 const bodySchema = z.object({
   records: z.array(recordSchema).min(1).max(200),
   formats: z.record(z.string(), z.string()),
+  categoricals: z.record(z.string(), z.array(z.string())).optional().default({}),
 });
 
 export async function POST(request: Request) {
@@ -27,7 +28,12 @@ export async function POST(request: Request) {
       messages: [
         {
           role: "system",
-          content: "Приведи значения записей к указанным форматам таблицы. Не выдумывай отсутствующие данные и не меняй смысл. Верни JSON {records:[...]}, сохрани порядок и число записей.",
+          content: [
+            "Приведи значения записей к указанным форматам таблицы. Не выдумывай отсутствующие данные и не меняй смысл. Верни JSON {records:[...]}, сохрани порядок и число записей.",
+            Object.keys(body.categoricals).length > 0
+              ? `\nДля следующих полей допустимы ТОЛЬКО указанные значения (выбери наиболее подходящее по смыслу). Если ни одно не подходит — ставь «-»:\n${Object.entries(body.categoricals).map(([field, values]) => `- ${field}: [${values.map((v) => `«${v}»`).join(", ")}]`).join("\n")}`
+              : "",
+          ].join(""),
         },
         { role: "user", content: JSON.stringify(body) },
       ],
