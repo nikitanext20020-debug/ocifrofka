@@ -21,7 +21,7 @@ describe("refineColumnMapping", () => {
       "Текст наказа",
     ]];
     const modelMapping: ColumnMapping = {
-      topic: 11,
+      topic: 10,
       full_name: 3,
       last_name: null,
       first_name: null,
@@ -32,7 +32,7 @@ describe("refineColumnMapping", () => {
     };
 
     expect(refineColumnMapping(headers, rows, modelMapping)).toEqual({
-      topic: 10,
+      topic: 12,
       full_name: null,
       last_name: 3,
       first_name: 4,

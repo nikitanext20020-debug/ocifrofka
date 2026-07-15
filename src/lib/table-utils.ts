@@ -8,6 +8,7 @@ import type {
   TableData,
 } from "@/lib/types";
 import { NAME_PART_FIELDS, RECORD_FIELDS } from "@/lib/types";
+import { findDescriptiveHeaderRowIndex } from "@/lib/column-mapping";
 
 const MAPPABLE_FIELDS = [...RECORD_FIELDS, ...NAME_PART_FIELDS] as const;
 
@@ -39,15 +40,36 @@ function valuesForMapping(record: Record<RecordField, string>) {
 export function normalizeTable(matrix: unknown[][]): TableData {
   if (matrix.length === 0) return { headers: [], rows: [] };
   const width = Math.max(...matrix.map((row) => row.length), 0);
-  const rawHeaders = matrix[0] ?? [];
+  const headerRowIndex = findDescriptiveHeaderRowIndex(matrix);
+  const rawHeaders = matrix[headerRowIndex] ?? [];
   const headers = Array.from({ length: width }, (_, index) => {
     const value = String(rawHeaders[index] ?? "").trim();
     return value || `Колонка ${index + 1}`;
   });
-  const rows = matrix.slice(1).map((row) =>
+  const rows = matrix.slice(headerRowIndex + 1).map((row) =>
     Array.from({ length: width }, (_, index) => row[index] ?? ""),
   );
   return { headers, rows };
+}
+
+export function applyRecordCategories(
+  rows: unknown[][],
+  targetRows: readonly number[],
+  records: ReadonlyArray<{ categories?: Record<string, string> }>,
+) {
+  const next = rows.map((row) => [...row]);
+  const applied: CellChange[] = [];
+  targetRows.forEach((rowIndex, recordIndex) => {
+    const row = next[rowIndex];
+    if (!row) return;
+    for (const [rawColumn, value] of Object.entries(records[recordIndex]?.categories ?? {})) {
+      const column = Number(rawColumn);
+      if (!Number.isInteger(column) || column < 0 || column >= row.length || !isEmptyCell(row[column])) continue;
+      row[column] = value;
+      applied.push({ row: rowIndex, column, value });
+    }
+  });
+  return { rows: next, applied };
 }
 
 export function applyCellChanges(

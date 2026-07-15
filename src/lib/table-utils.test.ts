@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendRecords, applyCellChanges, applyFixedColumnValues, findGapCells, findInsertRow, markSyntheticRowsForExport, mergeRecordsAt, normalizeTable, recordsToCsv, splitFullName } from "@/lib/table-utils";
+import { appendRecords, applyCellChanges, applyFixedColumnValues, applyRecordCategories, findGapCells, findInsertRow, markSyntheticRowsForExport, mergeRecordsAt, normalizeTable, recordsToCsv, splitFullName } from "@/lib/table-utils";
 import type { ColumnMapping, ExtractedRecord } from "@/lib/types";
 
 describe("normalizeTable", () => {
@@ -8,6 +8,28 @@ describe("normalizeTable", () => {
       headers: ["ФИО", "Колонка 2", "Телефон"],
       rows: [["Иванов", "Москва", ""]],
     });
+  });
+
+  it("uses the descriptive row instead of a technical header row", () => {
+    expect(normalizeTable([
+      ["A", "", "C", "D", "E", "F", "G", "H", "I", "J", "K", "", "M"],
+      ["", "МУНИЦИПАЛИТЕТ", "Адрес проживания", "Фамилия", "Имя", "Отчество", "Дата", "Номер мобильного телефона", "E-mail", "Вовлеченность в деятельность Партии", "Тематика предложения", "Направление обращения", "Текст наказа"],
+      ["", "Богородский г.о.", "Ногинск", "Иванов", "Иван", "Иванович", "01.01.1990", "7999", "", "Иное", "ЖКХ", "Благоустройство", "Починить дорогу"],
+    ])).toEqual({
+      headers: ["Колонка 1", "МУНИЦИПАЛИТЕТ", "Адрес проживания", "Фамилия", "Имя", "Отчество", "Дата", "Номер мобильного телефона", "E-mail", "Вовлеченность в деятельность Партии", "Тематика предложения", "Направление обращения", "Текст наказа"],
+      rows: [["", "Богородский г.о.", "Ногинск", "Иванов", "Иван", "Иванович", "01.01.1990", "7999", "", "Иное", "ЖКХ", "Благоустройство", "Починить дорогу"]],
+    });
+  });
+});
+
+describe("applyRecordCategories", () => {
+  it("writes K and L classifications only into empty cells of new rows", () => {
+    const result = applyRecordCategories(
+      [["старое", ""], ["", "уже заполнено"]],
+      [0, 1],
+      [{ categories: { 0: "Тематика", 1: "Направление" } }, { categories: { 0: "Другая тема", 1: "Нельзя заменить" } }],
+    );
+    expect(result.rows).toEqual([["старое", "Направление"], ["Другая тема", "уже заполнено"]]);
   });
 });
 

@@ -17,6 +17,7 @@ import { toast } from "sonner";
 import {
   applyCellChanges,
   applyFixedColumnValues,
+  applyRecordCategories,
   findGapCells,
   findInsertRow,
   markSyntheticRowsForExport,
@@ -48,6 +49,15 @@ const BATCH_SIZE = 30;
 const PARALLEL_REQUESTS = 3;
 const TABLE_PAGE_SIZE = 100;
 const STANDARD_MAPPING_FIELDS = ["topic", "birth_date", "address", "phone"] as const;
+
+function normalizedHeader(value: string) {
+  return value.toLocaleLowerCase("ru-RU").replaceAll("ё", "е").replace(/[^a-zа-я0-9]+/gi, " ").trim();
+}
+
+function isDerivedCategoryHeader(value: string) {
+  const header = normalizedHeader(value);
+  return header === "тематика предложения" || header === "тематика обращения" || header === "направление обращения";
+}
 
 function isNamePartField(field: MappableField): field is NamePartField {
   return (NAME_PART_FIELDS as readonly string[]).includes(field);
@@ -247,10 +257,11 @@ export function ExcelTab({
       const suggestedDefaults: Record<number, string> = {};
       for (const [rawColumn, values] of Object.entries(categoricals)) {
         const column = Number(rawColumn);
+        const header = normalizedHeader(table.headers[column] ?? "");
         const bogorodsky = values.find((value) => value.toLocaleLowerCase("ru-RU") === "богородский г.о.");
         const other = values.find((value) => value.toLocaleLowerCase("ru-RU") === "иное");
-        if (bogorodsky) suggestedDefaults[column] = bogorodsky;
-        else if (other) suggestedDefaults[column] = other;
+        if (header === "муниципалитет" && bogorodsky) suggestedDefaults[column] = bogorodsky;
+        else if (header.startsWith("вовлеченность в деятельность партии") && other) suggestedDefaults[column] = other;
       }
       setCategoricalDefaults(suggestedDefaults);
       setInsertRow(findInsertRow(table, result.mapping));
@@ -269,20 +280,24 @@ export function ExcelTab({
       // Build per-field categoricals: only for mapped columns that are categorical
       const fieldCategoricals: Record<string, string[]> = {};
       for (const field of RECORD_FIELDS) {
+        if (field === "topic") continue;
         const col = analysis.mapping[field];
         if (col !== null && analysis.categoricals[col]) {
           fieldCategoricals[field] = analysis.categoricals[col];
         }
       }
+      const categoryColumns = Object.entries(analysis.categoricals)
+        .map(([rawColumn, values]) => ({ column: Number(rawColumn), header: table.headers[Number(rawColumn)] ?? "", values }))
+        .filter(({ header }) => isDerivedCategoryHeader(header));
 
-      const normalized: Array<Record<(typeof RECORD_FIELDS)[number], string>> = [];
+      const normalized: Array<Record<(typeof RECORD_FIELDS)[number], string> & { categories: Record<string, string> }> = [];
       for (let start = 0; start < queue.length; start += BATCH_SIZE) {
         const batch = queue.slice(start, start + BATCH_SIZE).map(recordForApi);
         const result = await readApiResponse<{ records: typeof normalized }>(
           await fetch("/api/table/insert", {
             method: "POST",
             headers: agentHeaders(settings.table),
-            body: JSON.stringify({ records: batch, formats: analysis.formats, categoricals: fieldCategoricals }),
+            body: JSON.stringify({ records: batch, formats: analysis.formats, categoricals: fieldCategoricals, categoryColumns }),
           }),
         );
         normalized.push(...result.records);
@@ -291,7 +306,8 @@ export function ExcelTab({
       const startIndex = insertRow ?? findInsertRow(table, analysis.mapping);
       pushSnapshot();
       const { rows: mergedRows, writtenRows } = mergeRecordsAt(table, normalized, analysis.mapping, startIndex);
-      const fixed = applyFixedColumnValues(mergedRows, writtenRows, categoricalDefaults);
+      const categorized = applyRecordCategories(mergedRows, writtenRows, normalized);
+      const fixed = applyFixedColumnValues(categorized.rows, writtenRows, categoricalDefaults);
       replaceActiveRows(fixed.rows);
       setNewRows(writtenRows);
       setMarks({});
