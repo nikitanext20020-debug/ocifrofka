@@ -19,7 +19,8 @@
       }
     ],
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "xlsx": ["./src/lib/xlsx-preserving-wrapper.ts"]
     }
   },
   "include": [
