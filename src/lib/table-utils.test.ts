@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendRecords, applyCellChanges, findInsertRow, mergeRecordsAt, normalizeTable, recordsToCsv } from "@/lib/table-utils";
+import { appendRecords, applyCellChanges, findGapCells, findInsertRow, mergeRecordsAt, normalizeTable, recordsToCsv, splitFullName } from "@/lib/table-utils";
 import type { ColumnMapping, ExtractedRecord } from "@/lib/types";
 
 describe("normalizeTable", () => {
@@ -25,6 +25,41 @@ describe("applyCellChanges", () => {
     expect(result.rows).toEqual([["A", "ok"], ["C", "D"]]);
     expect(result.applied).toHaveLength(1);
   });
+
+  it("cannot replace a non-empty cell in empty-only mode", () => {
+    const result = applyCellChanges(
+      [["Существующее значение", ""]],
+      [
+        { row: 0, column: 0, value: "Нельзя" },
+        { row: 0, column: 1, value: "Можно" },
+      ],
+      new Set(["0:0", "0:1"]),
+      true,
+    );
+    expect(result.rows).toEqual([["Существующее значение", "Можно"]]);
+    expect(result.applied).toEqual([{ row: 0, column: 1, value: "Можно" }]);
+  });
+});
+
+describe("findGapCells", () => {
+  it("returns gaps only from explicitly selected new rows", () => {
+    const table = {
+      headers: ["ФИО", "Телефон"],
+      rows: [["Старая строка", ""], ["Новая строка", ""]],
+    };
+    const mapping: ColumnMapping = {
+      topic: null,
+      full_name: 0,
+      last_name: null,
+      first_name: null,
+      middle_name: null,
+      birth_date: null,
+      address: null,
+      phone: 1,
+    };
+
+    expect(findGapCells(table, mapping, [1])).toEqual([{ row: 1, column: 1 }]);
+  });
 });
 
 describe("appendRecords", () => {
@@ -32,7 +67,7 @@ describe("appendRecords", () => {
     const result = appendRecords(
       { headers: ["ID", "ФИО", "Телефон"], rows: [[1, "Петров", "8000"]] },
       [{ topic: "Тема", full_name: "Иванов Иван", birth_date: "-", address: "-", phone: "8999" }],
-      { topic: null, full_name: 1, birth_date: null, address: null, phone: 2 },
+      { topic: null, full_name: 1, last_name: null, first_name: null, middle_name: null, birth_date: null, address: null, phone: 2 },
     );
     expect(result.rows[1]).toEqual(["", "Иванов Иван", "8999"]);
   });
@@ -62,6 +97,9 @@ describe("findInsertRow", () => {
   const mapping: ColumnMapping = {
     topic: 3,
     full_name: 1,
+    last_name: null,
+    first_name: null,
+    middle_name: null,
     birth_date: null,
     address: null,
     phone: 2,
@@ -83,7 +121,7 @@ describe("findInsertRow", () => {
   });
 
   it("returns 0 when the table has no rows", () => {
-    expect(findInsertRow({ headers: ["ФИО"], rows: [] }, { topic: null, full_name: 0, birth_date: null, address: null, phone: null })).toBe(0);
+    expect(findInsertRow({ headers: ["ФИО"], rows: [] }, { topic: null, full_name: 0, last_name: null, first_name: null, middle_name: null, birth_date: null, address: null, phone: null })).toBe(0);
   });
 
   it("returns 0 when all mapped columns are monotone", () => {
@@ -91,7 +129,7 @@ describe("findInsertRow", () => {
       headers: ["Статус"],
       rows: [["Обработано"], ["Обработано"], ["Обработано"]],
     };
-    expect(findInsertRow(table, { topic: 0, full_name: null, birth_date: null, address: null, phone: null })).toBe(0);
+    expect(findInsertRow(table, { topic: 0, full_name: null, last_name: null, first_name: null, middle_name: null, birth_date: null, address: null, phone: null })).toBe(0);
   });
 });
 
@@ -99,6 +137,9 @@ describe("mergeRecordsAt", () => {
   const mapping: ColumnMapping = {
     topic: 3,
     full_name: 1,
+    last_name: null,
+    first_name: null,
+    middle_name: null,
     birth_date: null,
     address: null,
     phone: 2,
@@ -135,10 +176,58 @@ describe("mergeRecordsAt", () => {
     const { rows, writtenRows } = mergeRecordsAt(
       table,
       [{ topic: "-", full_name: "Иванов", birth_date: "-", address: "-", phone: "-" }],
-      { topic: null, full_name: 0, birth_date: null, address: null, phone: null },
+      { topic: null, full_name: 0, last_name: null, first_name: null, middle_name: null, birth_date: null, address: null, phone: null },
       0,
     );
     expect(rows).toHaveLength(0);
     expect(writtenRows).toHaveLength(0);
+  });
+});
+
+describe("splitFullName", () => {
+  it("splits surname, first name and patronymic", () => {
+    expect(splitFullName("  Котова   Людмила Сергеевна ")).toEqual({
+      last_name: "Котова",
+      first_name: "Людмила",
+      middle_name: "Сергеевна",
+    });
+  });
+
+  it("keeps a compound patronymic tail together", () => {
+    expect(splitFullName("Алиев Камиль Рашид оглы")).toEqual({
+      last_name: "Алиев",
+      first_name: "Камиль",
+      middle_name: "Рашид оглы",
+    });
+  });
+});
+
+describe("mergeRecordsAt with separate name columns", () => {
+  it("writes surname, first name and patronymic into three cells", () => {
+    const table = {
+      headers: ["Фамилия", "Имя", "Отчество"],
+      rows: [["", "", ""]],
+    };
+    const record = {
+      topic: "Ремонт",
+      full_name: "Котова Людмила Сергеевна",
+      birth_date: "10.12.1957",
+      address: "Ногинск",
+      phone: "7999",
+    };
+    const mapping: ColumnMapping = {
+      topic: null,
+      full_name: null,
+      last_name: 0,
+      first_name: 1,
+      middle_name: 2,
+      birth_date: null,
+      address: null,
+      phone: null,
+    };
+
+    const { rows } = mergeRecordsAt(table, [record], mapping, 0);
+
+    expect(rows[0]).toEqual(["Котова", "Людмила", "Сергеевна"]);
   });
 });

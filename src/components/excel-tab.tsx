@@ -3,6 +3,8 @@
 import { useMemo, useRef, useState } from "react";
 import {
   Bot,
+  ChevronLeft,
+  ChevronRight,
   Download,
   FileSpreadsheet,
   ListChecks,
@@ -23,12 +25,16 @@ import {
 } from "@/lib/table-utils";
 import {
   FIELD_LABELS,
+  NAME_PART_FIELDS,
+  NAME_PART_LABELS,
   RECORD_FIELDS,
   type AppSettings,
   type CellChange,
   type CellMarks,
   type ColumnMapping,
   type ExtractedRecord,
+  type MappableField,
+  type NamePartField,
   type RecordField,
   type TableAnalysis,
   type TableSnapshot,
@@ -39,6 +45,12 @@ import { Button, Card, EmptyState, SectionTitle } from "@/components/ui";
 
 const BATCH_SIZE = 30;
 const PARALLEL_REQUESTS = 3;
+const TABLE_PAGE_SIZE = 100;
+const STANDARD_MAPPING_FIELDS = ["topic", "birth_date", "address", "phone"] as const;
+
+function isNamePartField(field: MappableField): field is NamePartField {
+  return (NAME_PART_FIELDS as readonly string[]).includes(field);
+}
 
 async function runBatches<T>(tasks: Array<() => Promise<T[]>>) {
   const results: T[] = [];
@@ -65,6 +77,7 @@ export function ExcelTab({
   onQueueConsumed: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const tableViewportRef = useRef<HTMLDivElement>(null);
   const [workbook, setWorkbook] = useState<WorkbookData | null>(null);
   const [analysis, setAnalysis] = useState<TableAnalysis | null>(null);
   const [insertRow, setInsertRow] = useState<number | null>(null);
@@ -74,11 +87,47 @@ export function ExcelTab({
   const [notice, setNotice] = useState<string | null>(null);
   const [instruction, setInstruction] = useState("");
   const [busy, setBusy] = useState<BusyAction>(null);
+  const [tablePage, setTablePage] = useState(0);
 
   const table = workbook ? workbook.sheets[workbook.activeSheet] : null;
+  const tablePageCount = Math.max(1, Math.ceil((table?.rows.length ?? 0) / TABLE_PAGE_SIZE));
+  const activeTablePage = Math.min(tablePage, tablePageCount - 1);
+  const visibleRowStart = activeTablePage * TABLE_PAGE_SIZE;
+  const visibleRowEnd = Math.min(visibleRowStart + TABLE_PAGE_SIZE, table?.rows.length ?? 0);
+  const visibleRows = useMemo(
+    () => table?.rows.slice(visibleRowStart, visibleRowEnd) ?? [],
+    [table?.rows, visibleRowEnd, visibleRowStart],
+  );
+  const hasNameMapping = analysis
+    ? analysis.mapping.full_name !== null || NAME_PART_FIELDS.some((field) => analysis.mapping[field] !== null)
+    : false;
   const mappedCount = analysis
-    ? Object.values(analysis.mapping).filter((value) => value !== null).length
+    ? STANDARD_MAPPING_FIELDS.filter((field) => analysis.mapping[field] !== null).length + (hasNameMapping ? 1 : 0)
     : 0;
+
+  const updateColumnMapping = (field: MappableField, rawValue: string) => {
+    const column = rawValue === "" ? null : Number(rawValue);
+    setAnalysis((current) => {
+      if (!current) return current;
+      const mapping = { ...current.mapping, [field]: column };
+
+      if (field === "full_name" && column !== null) {
+        for (const part of NAME_PART_FIELDS) mapping[part] = null;
+      } else if (isNamePartField(field) && column !== null) {
+        mapping.full_name = null;
+        for (const part of NAME_PART_FIELDS) {
+          if (part !== field && mapping[part] === column) mapping[part] = null;
+        }
+      }
+
+      return { ...current, mapping };
+    });
+  };
+
+  const showTablePage = (page: number) => {
+    setTablePage(Math.max(0, Math.min(tablePageCount - 1, page)));
+    requestAnimationFrame(() => tableViewportRef.current?.scrollTo({ top: 0 }));
+  };
 
   const pushSnapshot = () => {
     if (!workbook) return;
@@ -127,6 +176,7 @@ export function ExcelTab({
       setNewRows([]);
       setHistory([]);
       setNotice(null);
+      setTablePage(0);
       toast.success("Таблица загружена");
     } catch {
       toast.error("Не удалось прочитать файл таблицы");
@@ -222,6 +272,7 @@ export function ExcelTab({
       setMarks({});
 
       if (writtenRows.length > 0) {
+        showTablePage(Math.floor(writtenRows[0] / TABLE_PAGE_SIZE));
         const startExcel = writtenRows[0] + 2;
         const endExcel = writtenRows[writtenRows.length - 1] + 2;
         const skipped = normalized.length - writtenRows.length;
@@ -242,9 +293,13 @@ export function ExcelTab({
 
   const fillGaps = async () => {
     if (!table || !analysis) return;
-    const gaps = findGapCells(table, analysis.mapping);
+    if (!newRows.length) {
+      toast.info("Сначала занесите новые строки из распознавания");
+      return;
+    }
+    const gaps = findGapCells(table, analysis.mapping, newRows);
     if (!gaps.length) {
-      toast.info("В замаппированных колонках нет пропусков");
+      toast.info("В новых строках нет пропусков в замаппированных колонках");
       return;
     }
     setBusy("gaps");
@@ -284,7 +339,7 @@ export function ExcelTab({
       }
       const { results: changes, errors } = await runBatches(tasks);
       const allowed = new Set(gaps.map(({ row, column }) => `${row}:${column}`));
-      const applied = applyCellChanges(table.rows, changes, allowed);
+      const applied = applyCellChanges(table.rows, changes, allowed, true);
       if (!applied.applied.length) {
         throw errors[0] ?? new Error("Модель не предложила значений для пропусков");
       }
@@ -294,8 +349,7 @@ export function ExcelTab({
       pushSnapshot();
       replaceActiveRows(applied.rows);
       setMarks(Object.fromEntries(applied.applied.map(({ row, column }) => [`${row}:${column}`, "generated"] as const)));
-      setNewRows([]);
-      setNotice(`Сгенерировано значений: ${applied.applied.length}`);
+      setNotice(`В новых строках сгенерировано значений: ${applied.applied.length}`);
       toast.success(`Заполнено ячеек: ${applied.applied.length}`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Не удалось заполнить пропуски");
@@ -316,7 +370,12 @@ export function ExcelTab({
             await fetch("/api/table/custom", {
               method: "POST",
               headers: agentHeaders(settings.table),
-              body: JSON.stringify({ instruction: instruction.trim(), headers: table.headers, rows }),
+              body: JSON.stringify({
+                instruction: instruction.trim(),
+                headers: table.headers,
+                rows,
+                mapping: analysis.mapping,
+              }),
             }),
           );
           return result.changes;
@@ -407,6 +466,7 @@ export function ExcelTab({
                     onChange={(event) => {
                       setWorkbook({ ...workbook, activeSheet: event.target.value });
                       setAnalysis(null); setInsertRow(null); setMarks({}); setNewRows([]); setHistory([]); setNotice(null);
+                      setTablePage(0);
                     }}
                   >
                     {workbook.sheetOrder.map((name) => <option key={name}>{name}</option>)}
@@ -417,7 +477,7 @@ export function ExcelTab({
             {table.headers.length === 0 ? (
               <EmptyState icon={<ListChecks className="size-8" />} title="Лист пуст" text="Выберите другой лист или загрузите файл с заголовками." />
             ) : (
-              <div className="max-h-[560px] overflow-auto">
+              <div ref={tableViewportRef} className="max-h-[560px] overflow-auto">
                 <table className="min-w-full border-collapse text-left text-sm">
                   <thead className="sticky top-0 z-10 bg-[#edf3f0] text-[#33423e]">
                     <tr>
@@ -428,7 +488,9 @@ export function ExcelTab({
                     </tr>
                   </thead>
                   <tbody>
-                    {table.rows.map((row, rowIndex) => (
+                    {visibleRows.map((row, visibleIndex) => {
+                      const rowIndex = visibleRowStart + visibleIndex;
+                      return (
                       <tr className={cn("border-b border-[#e5ebe8]", newRows.includes(rowIndex) && "bg-[#e8f7ee]")} key={rowIndex}>
                         <td className="border-r border-[#e0e7e4] px-3 py-2 text-center text-xs text-[#7b8985]">{rowIndex + 2}</td>
                         {table.headers.map((_, columnIndex) => {
@@ -449,12 +511,39 @@ export function ExcelTab({
                           );
                         })}
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
             )}
-            <div className="border-t border-[#e0e8e5] px-4 py-3 text-sm text-[#61706b]">Всего строк: {table.rows.length}</div>
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[#e0e8e5] px-4 py-3 text-sm text-[#61706b]">
+              <span>
+                Показано {table.rows.length ? visibleRowStart + 1 : 0}–{visibleRowEnd} из {table.rows.length} строк
+              </span>
+              {tablePageCount > 1 && (
+                <div className="flex items-center gap-2">
+                  <Button variant="secondary" className="h-9 px-2.5" disabled={activeTablePage === 0} onClick={() => showTablePage(activeTablePage - 1)} title="Предыдущая страница">
+                    <ChevronLeft className="size-4" />
+                  </Button>
+                  <label className="flex items-center gap-1.5">
+                    Страница
+                    <input
+                      type="number"
+                      min={1}
+                      max={tablePageCount}
+                      className="h-9 w-20 rounded-md border border-[#cbd6d2] bg-white px-2 text-center text-sm outline-none focus:border-[#23816e]"
+                      value={activeTablePage + 1}
+                      onChange={(event) => showTablePage(Number(event.target.value) - 1)}
+                    />
+                    из {tablePageCount}
+                  </label>
+                  <Button variant="secondary" className="h-9 px-2.5" disabled={activeTablePage >= tablePageCount - 1} onClick={() => showTablePage(activeTablePage + 1)} title="Следующая страница">
+                    <ChevronRight className="size-4" />
+                  </Button>
+                </div>
+              )}
+            </div>
           </Card>
 
           {table.headers.length > 0 && (
@@ -480,7 +569,7 @@ export function ExcelTab({
                     />
                   </label>
                 )}
-                <Button variant="secondary" loading={busy === "gaps"} disabled={!analysis} onClick={fillGaps}><Sparkles className="size-4" /> Дополнить пропуски</Button>
+                <Button variant="secondary" loading={busy === "gaps"} disabled={!analysis || !newRows.length} onClick={fillGaps}><Sparkles className="size-4" /> Дополнить пропуски в новых строках</Button>
               </div>
               {!analysis && <p className="mt-3 text-sm text-[#806b32]">Сначала проанализируйте таблицу, чтобы определить колонки и форматы.</p>}
               {notice && <div className="mt-4 rounded-md border border-[#b9dfd3] bg-[#edf8f4] px-4 py-3 text-sm font-medium text-[#1e6958]">{notice}</div>}
@@ -490,17 +579,14 @@ export function ExcelTab({
           {analysis && (
             <Card className="p-5">
               <SectionTitle title={`Маппинг колонок · ${mappedCount} из 5`} description="Проверьте соответствие и при необходимости выберите колонки вручную." />
-              <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-                {RECORD_FIELDS.map((field) => (
+              <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                {STANDARD_MAPPING_FIELDS.map((field) => (
                   <label key={field}>
                     <span className="mb-1.5 block text-sm font-medium">{FIELD_LABELS[field]}</span>
                     <select
                       className="h-10 w-full rounded-md border border-[#cbd6d2] bg-white px-3 text-sm"
                       value={analysis.mapping[field] ?? ""}
-                      onChange={(event) => setAnalysis({
-                        ...analysis,
-                        mapping: { ...analysis.mapping, [field]: event.target.value === "" ? null : Number(event.target.value) } as ColumnMapping,
-                      })}
+                      onChange={(event) => updateColumnMapping(field, event.target.value)}
                     >
                       <option value="">Не определено</option>
                       {columnOptions.map(({ index, label }) => <option value={index} key={index}>{label}</option>)}
@@ -508,6 +594,52 @@ export function ExcelTab({
                     <p className="mt-1.5 text-xs leading-5 text-[#71807b]">{analysis.formats[field] || "Формат не определён"}</p>
                   </label>
                 ))}
+              </div>
+              <div className="mt-5 rounded-md border border-[#d9e4e0] bg-[#f7faf8] p-4">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-semibold text-[#33423e]">ФИО</p>
+                    <p className="mt-1 text-xs leading-5 text-[#71807b]">
+                      Выберите либо одну колонку с полным ФИО, либо отдельные колонки фамилии, имени и отчества.
+                    </p>
+                  </div>
+                  <span className="rounded-full bg-[#e0f0ea] px-2.5 py-1 text-xs font-medium text-[#1e6958]">
+                    {analysis.mapping.full_name !== null
+                      ? "ФИО в одной колонке"
+                      : hasNameMapping
+                        ? "ФИО в отдельных колонках"
+                        : "Не определено"}
+                  </span>
+                </div>
+                <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                  <label>
+                    <span className="mb-1.5 block text-sm font-medium">ФИО одной строкой</span>
+                    <select
+                      className="h-10 w-full rounded-md border border-[#cbd6d2] bg-white px-3 text-sm"
+                      value={analysis.mapping.full_name ?? ""}
+                      onChange={(event) => updateColumnMapping("full_name", event.target.value)}
+                    >
+                      <option value="">Не используется</option>
+                      {columnOptions.map(({ index, label }) => <option value={index} key={index}>{label}</option>)}
+                    </select>
+                  </label>
+                  {NAME_PART_FIELDS.map((field) => (
+                    <label key={field}>
+                      <span className="mb-1.5 block text-sm font-medium">{NAME_PART_LABELS[field]}</span>
+                      <select
+                        className="h-10 w-full rounded-md border border-[#cbd6d2] bg-white px-3 text-sm"
+                        value={analysis.mapping[field] ?? ""}
+                        onChange={(event) => updateColumnMapping(field, event.target.value)}
+                      >
+                        <option value="">Не определено</option>
+                        {columnOptions.map(({ index, label }) => <option value={index} key={index}>{label}</option>)}
+                      </select>
+                    </label>
+                  ))}
+                </div>
+                <p className="mt-3 text-xs leading-5 text-[#71807b]">
+                  {analysis.formats.full_name || "Формат ФИО не определён"}
+                </p>
               </div>
               {Object.keys(analysis.categoricals).length > 0 && (
                 <div className="mt-5 border-t border-[#e0e8e5] pt-5">

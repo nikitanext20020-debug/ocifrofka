@@ -2,10 +2,39 @@ import type {
   CellChange,
   ColumnMapping,
   ExtractedRecord,
+  MappableField,
+  NamePartField,
   RecordField,
   TableData,
 } from "@/lib/types";
-import { RECORD_FIELDS } from "@/lib/types";
+import { NAME_PART_FIELDS, RECORD_FIELDS } from "@/lib/types";
+
+const MAPPABLE_FIELDS = [...RECORD_FIELDS, ...NAME_PART_FIELDS] as const;
+
+export function splitFullName(value: string): Record<NamePartField, string> {
+  const normalized = value.trim().replace(/\s+/g, " ");
+  if (!normalized || normalized === "-") {
+    return {
+      last_name: normalized,
+      first_name: normalized,
+      middle_name: normalized,
+    };
+  }
+
+  const [lastName = "", firstName = "", ...middleName] = normalized.split(" ");
+  return {
+    last_name: lastName,
+    first_name: firstName,
+    middle_name: middleName.join(" "),
+  };
+}
+
+function valuesForMapping(record: Record<RecordField, string>) {
+  return {
+    ...record,
+    ...splitFullName(record.full_name),
+  } satisfies Record<MappableField, string>;
+}
 
 export function normalizeTable(matrix: unknown[][]): TableData {
   if (matrix.length === 0) return { headers: [], rows: [] };
@@ -25,6 +54,7 @@ export function applyCellChanges(
   rows: unknown[][],
   changes: CellChange[],
   allowed?: Set<string>,
+  emptyOnly = false,
 ) {
   const next = rows.map((row) => [...row]);
   const applied: CellChange[] = [];
@@ -35,7 +65,8 @@ export function applyCellChanges(
       change.row >= next.length ||
       change.column < 0 ||
       change.column >= (next[change.row]?.length ?? 0) ||
-      (allowed && !allowed.has(key))
+      (allowed && !allowed.has(key)) ||
+      (emptyOnly && !isEmptyCell(next[change.row][change.column]))
     ) {
       continue;
     }
@@ -52,26 +83,45 @@ export function appendRecords(
 ) {
   const added = records.map((record) => {
     const row = Array.from({ length: table.headers.length }, () => "");
-    for (const field of RECORD_FIELDS) {
+    const values = valuesForMapping(record);
+    for (const field of MAPPABLE_FIELDS) {
       const column = mapping[field];
-      if (column !== null && column < row.length) row[column] = record[field];
+      if (
+        column !== null &&
+        column < row.length &&
+        !String(row[column] ?? "").trim()
+      ) {
+        row[column] = values[field];
+      }
     }
     return row;
   });
   return { ...table, rows: [...table.rows, ...added] };
 }
 
-export function findGapCells(table: TableData, mapping: ColumnMapping) {
-  const mappedColumns = Object.values(mapping).filter(
+export function isEmptyCell(value: unknown) {
+  const normalized = String(value ?? "").trim();
+  return !normalized || normalized === "-";
+}
+
+export function findGapCells(
+  table: TableData,
+  mapping: ColumnMapping,
+  targetRows: readonly number[],
+) {
+  const mappedColumns = [...new Set(Object.values(mapping).filter(
     (column): column is number => column !== null,
-  );
+  ))];
   const gaps: Array<{ row: number; column: number }> = [];
-  table.rows.forEach((row, rowIndex) => {
+  for (const rowIndex of [...new Set(targetRows)]) {
+    const row = table.rows[rowIndex];
+    if (!row) continue;
     mappedColumns.forEach((column) => {
-      const value = String(row[column] ?? "").trim();
-      if (!value || value === "-") gaps.push({ row: rowIndex, column });
+      if (column < table.headers.length && isEmptyCell(row[column])) {
+        gaps.push({ row: rowIndex, column });
+      }
     });
-  });
+  }
   return gaps;
 }
 
@@ -88,9 +138,9 @@ export function recordForApi(record: ExtractedRecord) {
  * Returns the index right after the last row that has real data.
  */
 export function findInsertRow(table: TableData, mapping: ColumnMapping): number {
-  const mappedColumns = Object.values(mapping).filter(
+  const mappedColumns = [...new Set(Object.values(mapping).filter(
     (col): col is number => col !== null,
-  );
+  ))];
   if (!mappedColumns.length || !table.rows.length) return 0;
 
   // Detect monotone columns: one value covers ≥ 95 % of non-empty rows
@@ -140,12 +190,13 @@ export function mergeRecordsAt(
     const rowIndex = insertRowIndex + i;
     if (rowIndex >= next.length) break; // do not add rows past the end
     const record = records[i];
-    for (const field of RECORD_FIELDS) {
+    const values = valuesForMapping(record);
+    for (const field of MAPPABLE_FIELDS) {
       const col = mapping[field];
       if (col === null || col >= (next[rowIndex]?.length ?? 0)) continue;
       const existing = String(next[rowIndex][col] ?? "").trim();
       if (!existing || existing === "-") {
-        next[rowIndex][col] = record[field];
+        next[rowIndex][col] = values[field];
       }
     }
     writtenRows.push(rowIndex);

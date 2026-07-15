@@ -25,6 +25,15 @@ describe("normalizeSettings", () => {
       ...legacySettings.vision,
     });
     expect(settings.activeVisionAgentId).toBe(settings.visionAgents[0].id);
+    expect(settings.parallelRequests).toBe(4);
+  });
+
+  it("normalizes the parallel request limit", () => {
+    const settings = normalizeSettings(legacySettings);
+
+    expect(normalizeSettings({ ...settings, parallelRequests: 99 }).parallelRequests).toBe(8);
+    expect(normalizeSettings({ ...settings, parallelRequests: 0 }).parallelRequests).toBe(1);
+    expect(normalizeSettings({ ...settings, parallelRequests: 3.6 }).parallelRequests).toBe(4);
   });
 });
 
