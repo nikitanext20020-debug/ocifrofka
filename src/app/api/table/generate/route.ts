@@ -50,28 +50,29 @@ function topicSimilarity(left: string, right: string) {
   return shared / new Set([...leftWords, ...rightWords]).size;
 }
 
-function validateTopicVariety(rows: string[][], headers: string[], examples: unknown[][]) {
+function topicQualityIssues(rows: string[][], headers: string[], examples: unknown[][]) {
+  const issues: string[] = [];
   const topicColumn = headers.findIndex((header) => normalized(header) === "текст наказа");
-  if (topicColumn < 0) return;
+  if (topicColumn < 0) return issues;
   const texts = rows.map((row) => row[topicColumn]?.trim() ?? "");
   if (texts.some((text) => (text.match(/[.!?](?:\s|$)/g) ?? []).length !== 2 || text.length > 240)) {
-    throw new GeneratedRowsError("Модель не выдержала формат из двух коротких предложений.");
+    issues.push("не все обращения состоят из двух коротких предложений");
   }
   if (texts.some((text) => /[—–]/.test(text))) {
-    throw new GeneratedRowsError("Модель использовала длинное тире.");
+    issues.push("в некоторых обращениях использовано длинное тире");
   }
   if (new Set(texts.map(normalized)).size !== texts.length) {
-    throw new GeneratedRowsError("Модель повторила текст обращения.");
+    issues.push("есть повторяющиеся обращения");
   }
 
   const normalizedTexts = texts.map(normalized);
   if (normalizedTexts.some((text) => /^(нельзя|почему|лучше|нам бы|если можно|в нашем|у нас в|просим|очень просим|нужно|необходимо)\b/.test(text))) {
-    throw new GeneratedRowsError("Модель использовала запрещённый шаблонный зачин.");
+    issues.push("использован шаблонный зачин");
   }
   const limitedStartMaximum = Math.min(2, Math.max(1, Math.floor(texts.length / 5)));
   for (const limited of ["хотелось бы", "очень ждут"]) {
     if (normalizedTexts.filter((text) => text.startsWith(limited)).length > limitedStartMaximum) {
-      throw new GeneratedRowsError(`Модель слишком часто использовала зачин «${limited}».`);
+      issues.push(`слишком часто используется зачин «${limited}»`);
     }
   }
 
@@ -81,20 +82,20 @@ function validateTopicVariety(rows: string[][], headers: string[], examples: unk
   texts.forEach((text, index) => {
     const comparisonTexts = [...exampleTexts, ...texts.slice(0, index)];
     if (comparisonTexts.some((candidate) => topicSimilarity(text, candidate) >= 0.75)) {
-      throw new GeneratedRowsError("Модель скопировала соседний текст, изменив только детали.");
+      issues.push("есть обращение, слишком похожее на соседнее или исходное");
     }
   });
 
-  if (texts.length < 5) return;
+  if (texts.length < 5) return [...new Set(issues)];
   const starts = normalizedTexts.map((text) => (text.match(/[a-zа-я0-9]+/gi) ?? []).slice(0, 2));
   const firstWords = starts.map(([first = ""]) => first);
   const imperativeStarts = firstWords.filter((word) => /(?:йте|ите|ьте)$/.test(word)).length;
   if (imperativeStarts > Math.ceil(texts.length * 0.4)) {
-    throw new GeneratedRowsError("Слишком много обращений начинаются с повелительного глагола.");
+    issues.push("слишком много обращений начинаются с повелительного глагола");
   }
   const prepositionStarts = starts.filter(([first]) => ["в", "во", "на"].includes(first)).length;
   if (prepositionStarts > Math.ceil(texts.length * 0.4)) {
-    throw new GeneratedRowsError("Слишком много обращений начинаются с «В», «Во» или «На».");
+    issues.push("слишком много обращений начинаются с «В», «Во» или «На»");
   }
 
   const startCounts = new Map<string, number>();
@@ -103,26 +104,14 @@ function validateTopicVariety(rows: string[][], headers: string[], examples: unk
     startCounts.set(key, (startCounts.get(key) ?? 0) + 1);
   }
   if ([...startCounts.values()].some((count) => count > 2)) {
-    throw new GeneratedRowsError("Модель слишком часто повторила одинаковое начало обращения.");
+    issues.push("слишком часто повторяется одинаковое начало обращения");
   }
-
-  const structureBuckets = firstWords.map((word) => {
-    if (/(?:йте|ите|ьте)$/.test(word)) return "imperative";
-    if (["в", "во", "на"].includes(word)) return "location";
-    if (["после", "когда", "каждый", "каждое", "зимой", "летом", "утром", "вечером", "сейчас"].includes(word)) return "circumstance";
-    if (["детям", "жителям", "родителям", "пассажирам", "водителям", "пешеходам", "пожилым", "школьникам"].includes(word)) return "people";
-    return "other";
-  });
-  const bucketCounts = new Map<string, number>();
-  structureBuckets.forEach((bucket) => bucketCounts.set(bucket, (bucketCounts.get(bucket) ?? 0) + 1));
-  if (bucketCounts.size < 3 || [...bucketCounts.values()].some((count) => count > Math.ceil(texts.length * 0.55))) {
-    throw new GeneratedRowsError("В подборке доминирует одна и та же конструкция предложений.");
-  }
+  return [...new Set(issues)];
 }
 
 function validateAndNormalizeRows(rows: string[][], body: z.infer<typeof bodySchema>) {
   if (rows.length !== body.count || rows.some((row) => row.length !== body.headers.length)) {
-    throw new Error("Модель вернула неправильное количество строк или колонок.");
+    throw new GeneratedRowsError("Модель вернула неправильное количество строк или колонок.");
   }
 
   const examples = new Set(body.examples.map((row) => JSON.stringify(row.map(normalized))));
@@ -138,7 +127,7 @@ function validateAndNormalizeRows(rows: string[][], body: z.infer<typeof bodySch
     const row = source.map((value) => String(value ?? "").trim());
     for (const { column, values } of categoricalColumns) {
       const canonical = values.find((candidate) => normalized(candidate) === normalized(row[column]));
-      if (!canonical) throw new Error(`Модель выбрала недопустимое значение для колонки «${body.headers[column]}».`);
+      if (!canonical) throw new GeneratedRowsError(`Модель выбрала недопустимое значение для колонки «${body.headers[column]}».`);
       row[column] = canonical;
     }
     for (const { column, value } of fixedColumns) row[column] = value;
@@ -150,12 +139,14 @@ function validateAndNormalizeRows(rows: string[][], body: z.infer<typeof bodySch
     });
 
     const key = JSON.stringify(row.map(normalized));
-    if (examples.has(key) || uniqueRows.has(key)) throw new Error("Модель повторила существующую строку.");
+    if (examples.has(key) || uniqueRows.has(key)) throw new GeneratedRowsError("Модель повторила существующую строку.");
     uniqueRows.add(key);
     return row;
   });
-  validateTopicVariety(normalizedRows, body.headers, body.examples);
-  return normalizedRows;
+  return {
+    rows: normalizedRows,
+    qualityIssues: topicQualityIssues(normalizedRows, body.headers, body.examples),
+  };
 }
 
 export async function POST(request: Request) {
@@ -198,12 +189,36 @@ export async function POST(request: Request) {
 
     const first = await generate();
     try {
-      return Response.json({ rows: validateAndNormalizeRows(first.rows, body) });
+      const firstValidated = validateAndNormalizeRows(first.rows, body);
+      if (!firstValidated.qualityIssues.length) return Response.json(firstValidated);
+
+      const second = await generate(true);
+      try {
+        const secondValidated = validateAndNormalizeRows(second.rows, body);
+        return Response.json({
+          ...secondValidated,
+          ...(secondValidated.qualityIssues.length
+            ? { warning: `Строки созданы, но проверьте тексты: ${secondValidated.qualityIssues.join("; ")}.` }
+            : {}),
+        });
+      } catch (retryError) {
+        if (!(retryError instanceof GeneratedRowsError)) throw retryError;
+        return Response.json({
+          rows: firstValidated.rows,
+          warning: `Строки созданы, но повторная проверка не улучшила тексты: ${firstValidated.qualityIssues.join("; ")}.`,
+        });
+      }
     } catch (error) {
       if (!(error instanceof GeneratedRowsError)) throw error;
       const second = await generate(true);
       try {
-        return Response.json({ rows: validateAndNormalizeRows(second.rows, body) });
+        const secondValidated = validateAndNormalizeRows(second.rows, body);
+        return Response.json({
+          ...secondValidated,
+          ...(secondValidated.qualityIssues.length
+            ? { warning: `Строки созданы, но проверьте тексты: ${secondValidated.qualityIssues.join("; ")}.` }
+            : {}),
+        });
       } catch (retryError) {
         if (retryError instanceof GeneratedRowsError) {
           return Response.json({ error: retryError.message }, { status: 502 });
