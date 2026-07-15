@@ -15,6 +15,8 @@ declare module "xlsx" {
         header?: number;
         raw?: boolean;
         defval?: unknown;
+        dateNF?: string;
+        [key: string]: unknown;
       },
     ): T[];
     book_new(): WorkBook;
