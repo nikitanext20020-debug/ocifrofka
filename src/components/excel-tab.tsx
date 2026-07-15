@@ -21,6 +21,7 @@ import {
   findGapCells,
   findInsertRow,
   markSyntheticRowsForExport,
+  mergeGeneratedRowsAt,
   mergeRecordsAt,
   normalizeTable,
   recordForApi,
@@ -49,6 +50,13 @@ const BATCH_SIZE = 30;
 const PARALLEL_REQUESTS = 3;
 const TABLE_PAGE_SIZE = 100;
 const STANDARD_MAPPING_FIELDS = ["topic", "birth_date", "address", "phone"] as const;
+const DEFAULT_GENERATION_INSTRUCTION = `Используй только направления: Благоустройство, Дороги, ЖКХ, Транспорт, Здравоохранение, Образование.
+Тематики только: Обустройство самой большой страны в мире; Демографический вызов; Культурно-ценностный вызов.
+Каждый текст состоит ровно из 2 коротких предложений: сначала что сделать, затем почему это важно. Тон спокойный, без наезда, канцелярита и длинных тире.
+Не выдумывай новые направления. Темы должны быть крупными, но понятными: мост, поликлиника, школа, детский сад, парк, коммунальные сети, автобусы.
+Пиши как обычные жители, а не как пресс-служба. Не начинай с «Нельзя», «Почему», «Лучше», «Нам бы», «Если можно», «В нашем», «У нас в», «Просим», «Очень просим», «Нужно» или «Необходимо». Не штампуй начала с «В» и названия населённого пункта. «Хотелось бы» и «Очень ждут» допустимы не более 1–2 раз во всей подборке.
+Формулируй просьбу прямо: «Постройте», «Добавьте», «Сделайте», «Замените» или другим подходящим глаголом, каждый раз по-разному. Не копируй соседний текст, меняя только улицу или город. Все обращения должны отличаться по началу, ритму и формулировкам.
+В колонке вовлечённости в деятельность Партии выбери «Иное». Остальные значения выбирай по смыслу.`;
 
 function normalizedHeader(value: string) {
   return value.toLocaleLowerCase("ru-RU").replaceAll("ё", "е").replace(/[^a-zа-я0-9]+/gi, " ").trim();
@@ -57,6 +65,13 @@ function normalizedHeader(value: string) {
 function isDerivedCategoryHeader(value: string) {
   const header = normalizedHeader(value);
   return header === "тематика предложения" || header === "тематика обращения" || header === "направление обращения";
+}
+
+function isGeneratorCategoricalHeader(value: string) {
+  const header = normalizedHeader(value);
+  return isDerivedCategoryHeader(value)
+    || header === "муниципалитет"
+    || header.startsWith("вовлеченность в деятельность партии");
 }
 
 function isGeneratedColumnHeader(value: string) {
@@ -80,7 +95,7 @@ async function runBatches<T>(tasks: Array<() => Promise<T[]>>) {
   return { results, errors };
 }
 
-type BusyAction = "load" | "analyze" | "insert" | "gaps" | null;
+type BusyAction = "load" | "analyze" | "insert" | "gaps" | "generate" | null;
 
 export function ExcelTab({
   settings,
@@ -103,6 +118,8 @@ export function ExcelTab({
   const [history, setHistory] = useState<TableSnapshot[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [instruction, setInstruction] = useState("");
+  const [generationInstruction, setGenerationInstruction] = useState(DEFAULT_GENERATION_INSTRUCTION);
+  const [generationCount, setGenerationCount] = useState(10);
   const [busy, setBusy] = useState<BusyAction>(null);
   const [tablePage, setTablePage] = useState(0);
 
@@ -422,6 +439,66 @@ export function ExcelTab({
     }
   };
 
+  const generateSyntheticRows = async () => {
+    if (!table || !analysis) return;
+    const count = Number.isFinite(generationCount)
+      ? Math.max(1, Math.min(100, Math.round(generationCount)))
+      : 1;
+    setBusy("generate");
+    try {
+      const examples = table.rows
+        .filter((row, rowIndex) => (
+          !syntheticRows.includes(rowIndex)
+          && row.filter((value) => String(value ?? "").trim()).length >= Math.min(3, table.headers.length)
+        ))
+        .slice(0, 20);
+      const categoricals = Object.fromEntries(
+        Object.entries(analysis.categoricals)
+          .filter(([rawColumn]) => isGeneratorCategoricalHeader(table.headers[Number(rawColumn)] ?? ""))
+          .map(([rawColumn, values]) => [table.headers[Number(rawColumn)], values] as const)
+          .filter(([header]) => Boolean(header)),
+      );
+      const fixedValues = Object.fromEntries(
+        Object.entries(categoricalDefaults)
+          .map(([rawColumn, value]) => [table.headers[Number(rawColumn)], value] as const)
+          .filter(([header, value]) => Boolean(header && value)),
+      );
+      const result = await readApiResponse<{ rows: string[][] }>(
+        await fetch("/api/table/generate", {
+          method: "POST",
+          headers: agentHeaders(settings.table),
+          body: JSON.stringify({
+            count,
+            headers: table.headers,
+            examples,
+            formats: analysis.formats,
+            categoricals,
+            fixedValues,
+            instruction: generationInstruction.trim(),
+          }),
+        }),
+      );
+
+      const startIndex = insertRow ?? findInsertRow(table, analysis.mapping);
+      const merged = mergeGeneratedRowsAt(table, result.rows, startIndex);
+      const fixed = applyFixedColumnValues(merged.rows, merged.writtenRows, categoricalDefaults);
+      const allApplied = [...merged.applied, ...fixed.applied];
+      pushSnapshot();
+      replaceActiveRows(fixed.rows);
+      setNewRows(merged.writtenRows);
+      setSyntheticRows((current) => [...new Set([...current, ...merged.writtenRows])]);
+      setMarks(Object.fromEntries(allApplied.map(({ row, column }) => [`${row}:${column}`, "generated"] as const)));
+      setInsertRow(startIndex + merged.writtenRows.length);
+      if (merged.writtenRows.length) showTablePage(Math.floor(merged.writtenRows[0] / TABLE_PAGE_SIZE));
+      setNotice(`Создано синтетических тестовых строк: ${merged.writtenRows.length}. При скачивании они будут явно помечены.`);
+      toast.success(`Создано тестовых строк: ${merged.writtenRows.length}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Не удалось создать тестовые строки");
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const undo = () => {
     const snapshot = history.at(-1);
     if (!snapshot) return;
@@ -694,6 +771,44 @@ export function ExcelTab({
               )}
             </Card>
           )}
+
+          <Card className="p-5">
+            <SectionTitle
+              title="Генератор синтетических тестовых строк"
+              description="Создаёт новые строки по формату и стилю примеров. Они не должны использоваться как записи реальных людей и при скачивании помечаются как синтетические."
+            />
+            <div className="mt-4 flex flex-wrap items-end gap-3">
+              <label className="w-40">
+                <span className="mb-1.5 block text-sm font-medium">Количество строк</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  className="h-10 w-full rounded-md border border-[#cbd6d2] bg-white px-3 text-sm outline-none focus:border-[#23816e] focus:ring-2 focus:ring-[#23816e]/15"
+                  value={generationCount}
+                  onChange={(event) => setGenerationCount(Number(event.target.value))}
+                  disabled={!analysis}
+                />
+              </label>
+              <Button
+                loading={busy === "generate"}
+                disabled={!analysis || busy !== null}
+                onClick={generateSyntheticRows}
+              >
+                <Sparkles className="size-4" /> Создать тестовые строки
+              </Button>
+            </div>
+            <label className="mt-4 block">
+              <span className="mb-1.5 block text-sm font-medium">Дополнительный промпт</span>
+              <textarea
+                className="min-h-48 w-full resize-y rounded-md border border-[#cbd6d2] p-3 text-sm outline-none focus:border-[#23816e] focus:ring-2 focus:ring-[#23816e]/15"
+                value={generationInstruction}
+                onChange={(event) => setGenerationInstruction(event.target.value)}
+                disabled={!analysis}
+              />
+            </label>
+            {!analysis && <p className="mt-3 text-sm text-[#806b32]">Сначала проанализируйте таблицу, чтобы определить форматы и допустимые значения.</p>}
+          </Card>
 
           <Card className="p-5">
             <SectionTitle title="Инструкция для заполнения пропусков" description="Используется только кнопкой «Дополнить пропуски» и только для последних добавленных строк. Заполненные и старые ячейки не изменяются." />

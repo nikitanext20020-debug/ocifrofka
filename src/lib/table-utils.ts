@@ -184,6 +184,26 @@ export function appendRecords(
   return { ...table, rows: [...table.rows, ...added] };
 }
 
+export function mergeGeneratedRowsAt(table: TableData, generatedRows: string[][], insertRowIndex: number) {
+  const next = table.rows.map((row) => [...row]);
+  const writtenRows: number[] = [];
+  const applied: CellChange[] = [];
+
+  generatedRows.forEach((generated, generatedIndex) => {
+    const rowIndex = insertRowIndex + generatedIndex;
+    while (next.length <= rowIndex) next.push(Array.from({ length: table.headers.length }, () => ""));
+    const target = next[rowIndex];
+    generated.slice(0, table.headers.length).forEach((value, column) => {
+      if (!value.trim() || !isEmptyCell(target[column])) return;
+      target[column] = value;
+      applied.push({ row: rowIndex, column, value });
+    });
+    writtenRows.push(rowIndex);
+  });
+
+  return { rows: next, writtenRows, applied };
+}
+
 export function isEmptyCell(value: unknown) {
   const normalized = String(value ?? "").trim();
   return !normalized || normalized === "-";
