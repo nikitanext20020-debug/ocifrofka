@@ -2,6 +2,7 @@ import { z } from "zod";
 import { apiError, callStructured, readAgentConfig } from "@/lib/model-client";
 import { cellChangesSchema } from "@/lib/schemas";
 import { isBriefRecognizedText, isEmptyCell } from "@/lib/table-utils";
+import type { CellChange } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -16,6 +17,91 @@ const bodySchema = z.object({
   instruction: z.string().max(3000).optional().default(""),
 });
 
+type FillBody = z.infer<typeof bodySchema>;
+type Gap = FillBody["gaps"][number];
+
+function cellKey(row: number, column: number) {
+  return `${row}:${column}`;
+}
+
+function acceptedChanges(
+  changes: CellChange[],
+  gaps: Gap[],
+  headers: string[],
+  categoricals: Record<string, string[]>,
+) {
+  const allowed = new Set(gaps.map(({ row, column }) => cellKey(row, column)));
+  const accepted = new Map<string, CellChange>();
+
+  for (const change of changes) {
+    const key = cellKey(change.row, change.column);
+    if (!allowed.has(key)) continue;
+
+    const value = String(change.value ?? "").trim();
+    if (!value || value === "-") continue;
+
+    const header = headers[change.column] ?? "";
+    const allowedValues = categoricals[header];
+    if (allowedValues?.length && !allowedValues.includes(value)) continue;
+
+    accepted.set(key, { ...change, value });
+  }
+
+  return accepted;
+}
+
+function rowsWithChanges(rows: FillBody["rows"], changes: Iterable<CellChange>) {
+  const next = rows.map(({ row, values }) => ({ row, values: [...values] }));
+  const byRow = new Map(next.map((entry) => [entry.row, entry.values]));
+  for (const change of changes) {
+    const values = byRow.get(change.row);
+    if (values && change.column < values.length) values[change.column] = change.value;
+  }
+  return next;
+}
+
+async function generateChanges(
+  config: ReturnType<typeof readAgentConfig>,
+  body: FillBody,
+  rows: FillBody["rows"],
+  gaps: Gap[],
+  retry = false,
+) {
+  return callStructured({
+    config,
+    schema: cellChangesSchema,
+    messages: [
+      {
+        role: "system",
+        content: [
+          "В rows переданы только строки, только что добавленные из распознавания.",
+          ` Для КАЖДОЙ из ${gaps.length} ячеек в gaps верни ровно одно изменение. Нельзя пропускать ни одну ячейку, возвращать пустую строку или прочерк.`,
+          " Не изменяй строки и ячейки, которых нет в gaps. Индексы row и column абсолютные и должны остаться без изменений.",
+          " Если «Текст наказа» содержит одно-два общих слова, например «спорт», «ЖКХ», «дороги» или «благоустройство», разверни их в правдоподобный конкретный текст обращения в стиле examples.",
+          " Колонки «Тематика предложения»/«Тематика обращения» и «Направление обращения» определяй по итоговому тексту наказа в той же строке. Сначала сформулируй текст наказа, затем классифицируй его. Для каждой такой колонки обязательно выбери ровно одно значение из соответствующего списка.",
+          " Верни только JSON вида {changes:[{row,column,value}]}. Количество элементов changes должно точно совпадать с количеством gaps, а пары row/column не должны повторяться.",
+          retry ? " Это повторная попытка: в gaps оставлены только ячейки, которые модель пропустила или заполнила недопустимым значением. Заполни их все." : "",
+          Object.keys(body.categoricals).length > 0
+            ? `\nДопустимые значения категориальных колонок:\n${Object.entries(body.categoricals).map(([header, values]) => `- «${header}»: [${values.map((value) => `«${value}»`).join(", ")}]`).join("\n")}`
+            : "",
+          body.instruction.trim() ? `\nДополнительная инструкция пользователя:\n${body.instruction.trim()}` : "",
+        ].join(""),
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          headers: body.headers,
+          rows,
+          gaps,
+          examples: body.examples,
+          formats: body.formats,
+          categoricals: body.categoricals,
+        }),
+      },
+    ],
+  });
+}
+
 export async function POST(request: Request) {
   try {
     const config = readAgentConfig(request);
@@ -27,30 +113,37 @@ export async function POST(request: Request) {
       const topicRefinement = column < body.headers.length && isBriefRecognizedText(current);
       return column < body.headers.length && values !== undefined && (isEmptyCell(current) || topicRefinement);
     });
+
     if (!safeGaps.length) {
       return Response.json({ error: "В выбранных новых строках нет доступных ячеек." }, { status: 400 });
     }
-    const allowed = new Set(safeGaps.map(({ row, column }) => `${row}:${column}`));
-    const result = await callStructured({
-      config,
-      schema: cellChangesSchema,
-      messages: [
-        {
-          role: "system",
-          content: [
-            "В rows переданы только строки, только что добавленные из распознавания. Заполни только перечисленные gaps правдоподобными значениями в стиле examples. Никогда не изменяй строки вне rows. Индексы row и column не меняй. Если поле уже содержит короткий распознанный текст по типу 'спорт', 'жкх', 'дороги', разрешено расширить его до полноценного текста наказа. Верни JSON {changes:[{row,column,value}]}.",
-            Object.keys(body.categoricals).length > 0
-              ? `\nКатегориальные колонки — обязательно выбирай только значения из списка:\n${Object.entries(body.categoricals).map(([header, values]) => `- «${header}»: [${values.map((v) => `«${v}»`).join(", ")}]`).join("\n")}`
-              : "",
-            body.instruction.trim() ? `\nИнструкция пользователя:\n${body.instruction.trim()}` : "",
-          ].join(""),
-        },
-        { role: "user", content: JSON.stringify({ ...body, gaps: safeGaps }) },
-      ],
+
+    const first = await generateChanges(config, body, body.rows, safeGaps);
+    const accepted = acceptedChanges(first.changes, safeGaps, body.headers, body.categoricals);
+    let missing = safeGaps.filter(({ row, column }) => !accepted.has(cellKey(row, column)));
+
+    if (missing.length) {
+      const retryRows = rowsWithChanges(body.rows, accepted.values());
+      const second = await generateChanges(config, body, retryRows, missing, true);
+      const retryAccepted = acceptedChanges(second.changes, missing, body.headers, body.categoricals);
+      for (const [key, change] of retryAccepted) accepted.set(key, change);
+      missing = safeGaps.filter(({ row, column }) => !accepted.has(cellKey(row, column)));
+    }
+
+    if (missing.length) {
+      return Response.json(
+        { error: `Модель не заполнила обязательные ячейки: ${missing.length}. Повторите действие.` },
+        { status: 502 },
+      );
+    }
+
+    return Response.json({
+      changes: safeGaps.map(({ row, column }) => accepted.get(cellKey(row, column))!),
     });
-    return Response.json({ changes: result.changes.filter((change) => allowed.has(`${change.row}:${change.column}`)) });
   } catch (error) {
-    if (error instanceof z.ZodError) return Response.json({ error: "Не удалось подготовить пропуски." }, { status: 400 });
+    if (error instanceof z.ZodError) {
+      return Response.json({ error: "Не удалось подготовить пропуски." }, { status: 400 });
+    }
     return apiError(error);
   }
 }
