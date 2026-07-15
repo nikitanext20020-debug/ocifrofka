@@ -20,7 +20,7 @@
     ],
     "paths": {
       "@/*": ["./src/*"],
-      "xlsx": ["./src/lib/xlsx-preserving-wrapper.ts"]
+      "xlsx": ["./src/lib/xlsx-russian-date-wrapper.ts"]
     }
   },
   "include": [
