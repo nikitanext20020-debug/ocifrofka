@@ -8,6 +8,15 @@ export const RECORD_FIELDS = [
 
 export type RecordField = (typeof RECORD_FIELDS)[number];
 
+export const NAME_PART_FIELDS = [
+  "last_name",
+  "first_name",
+  "middle_name",
+] as const;
+
+export type NamePartField = (typeof NAME_PART_FIELDS)[number];
+export type MappableField = RecordField | NamePartField;
+
 export type ExtractedRecord = Record<RecordField, string> & {
   id: string;
   confidence_notes: string;
@@ -29,6 +38,7 @@ export type VisionAgent = AgentConfig & {
 export type AppSettings = {
   visionAgents: VisionAgent[];
   activeVisionAgentId: string;
+  parallelRequests: number;
   table: AgentConfig;
   extractionPrompt: string;
 };
@@ -45,7 +55,7 @@ export type WorkbookData = {
   sheets: Record<string, TableData>;
 };
 
-export type ColumnMapping = Record<RecordField, number | null>;
+export type ColumnMapping = Record<MappableField, number | null>;
 
 export type TableAnalysis = {
   mapping: ColumnMapping;
@@ -75,4 +85,10 @@ export const FIELD_LABELS: Record<RecordField, string> = {
   birth_date: "Дата рождения",
   address: "Адрес",
   phone: "Телефон",
+};
+
+export const NAME_PART_LABELS: Record<NamePartField, string> = {
+  last_name: "Фамилия",
+  first_name: "Имя",
+  middle_name: "Отчество",
 };

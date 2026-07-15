@@ -1,8 +1,14 @@
-import { DEFAULT_SETTINGS } from "@/lib/constants";
+import {
+  DEFAULT_PARALLEL_REQUESTS,
+  DEFAULT_SETTINGS,
+  MAX_PARALLEL_REQUESTS,
+  MIN_PARALLEL_REQUESTS,
+} from "@/lib/constants";
 import type { AgentConfig, AppSettings, VisionAgent } from "@/lib/types";
 
-type LegacySettings = Omit<AppSettings, "visionAgents" | "activeVisionAgentId"> & {
+type LegacySettings = Omit<AppSettings, "visionAgents" | "activeVisionAgentId" | "parallelRequests"> & {
   vision?: AgentConfig;
+  parallelRequests?: number;
 };
 
 function createVisionAgent(config: AgentConfig, index = 1): VisionAgent {
@@ -13,12 +19,24 @@ function createVisionAgent(config: AgentConfig, index = 1): VisionAgent {
   };
 }
 
+export function normalizeParallelRequests(value: unknown) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_PARALLEL_REQUESTS;
+  }
+  return Math.min(
+    MAX_PARALLEL_REQUESTS,
+    Math.max(MIN_PARALLEL_REQUESTS, Math.round(value)),
+  );
+}
+
 export function normalizeSettings(value: AppSettings | LegacySettings): AppSettings {
+  const parallelRequests = normalizeParallelRequests(value.parallelRequests);
+
   if ("visionAgents" in value && Array.isArray(value.visionAgents) && value.visionAgents.length > 0) {
     const activeVisionAgentId = value.visionAgents.some((agent) => agent.id === value.activeVisionAgentId)
       ? value.activeVisionAgentId
       : value.visionAgents[0].id;
-    return { ...value, activeVisionAgentId };
+    return { ...value, activeVisionAgentId, parallelRequests };
   }
 
   const vision = "vision" in value && value.vision ? value.vision : DEFAULT_SETTINGS.visionAgents[0];
@@ -28,6 +46,7 @@ export function normalizeSettings(value: AppSettings | LegacySettings): AppSetti
     extractionPrompt: value.extractionPrompt,
     visionAgents: [agent],
     activeVisionAgentId: agent.id,
+    parallelRequests,
   };
 }
 

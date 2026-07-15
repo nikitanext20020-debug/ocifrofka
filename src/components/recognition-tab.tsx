@@ -1,12 +1,17 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState, type SetStateAction } from "react";
 import {
   ArrowRight,
+  ChevronLeft,
+  ChevronRight,
+  CircleAlert,
   Download,
   FileImage,
   FileJson,
   Images,
+  LoaderCircle,
+  RefreshCw,
   ScanText,
   Trash2,
   UploadCloud,
@@ -15,14 +20,25 @@ import {
 import { toast } from "sonner";
 import { MAX_FILE_SIZE } from "@/lib/constants";
 import { compressImage, createThumbnail, fileToDataUrl, pdfToImages } from "@/lib/client-images";
-import { getActiveVisionAgent } from "@/lib/vision-agents";
+import { getActiveVisionAgent, normalizeParallelRequests } from "@/lib/vision-agents";
+import { fetchWithRateLimitRetry, runPromisePool } from "@/lib/recognition-queue";
+import { parseRecognitionSession } from "@/lib/recognition-session";
 import { extractedRecordResponseSchema } from "@/lib/schemas";
 import { FIELD_LABELS, RECORD_FIELDS, type AppSettings, type ExtractedRecord, type RecordField } from "@/lib/types";
 import { downloadBlob, agentHeaders, readApiResponse, cn } from "@/lib/utils";
 import { recordsToCsv } from "@/lib/table-utils";
 import { Button, Card, EmptyState, Input, SectionTitle } from "@/components/ui";
 
-type PendingImage = { id: string; name: string; dataUrl: string };
+type PendingImageStatus = "idle" | "queued" | "processing" | "error";
+type PendingImage = {
+  id: string;
+  name: string;
+  dataUrl: string;
+  status: PendingImageStatus;
+  error?: string;
+};
+
+const SESSION_PAGE_SIZE = 25;
 
 export function RecognitionTab({
   settings,
@@ -32,16 +48,25 @@ export function RecognitionTab({
 }: {
   settings: AppSettings;
   records: ExtractedRecord[];
-  onRecordsChange: (records: ExtractedRecord[]) => void;
+  onRecordsChange: (records: SetStateAction<ExtractedRecord[]>) => void;
   onSendToExcel: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const jsonInputRef = useRef<HTMLInputElement>(null);
   const [images, setImages] = useState<PendingImage[]>([]);
   const [dragging, setDragging] = useState(false);
   const [converting, setConverting] = useState(false);
   const [processing, setProcessing] = useState(false);
-  const [progress, setProgress] = useState({ current: 0, total: 0 });
+  const [importingJson, setImportingJson] = useState(false);
+  const [progress, setProgress] = useState({ completed: 0, total: 0 });
+  const [sessionPage, setSessionPage] = useState(0);
   const activeVisionAgent = getActiveVisionAgent(settings);
+  const sessionPageCount = Math.max(1, Math.ceil(records.length / SESSION_PAGE_SIZE));
+  const activeSessionPage = Math.min(sessionPage, sessionPageCount - 1);
+  const visibleRecords = useMemo(
+    () => records.slice(activeSessionPage * SESSION_PAGE_SIZE, (activeSessionPage + 1) * SESSION_PAGE_SIZE),
+    [activeSessionPage, records],
+  );
 
   const addFiles = async (files: File[]) => {
     const valid = files.filter((file) => {
@@ -60,9 +85,9 @@ export function RecognitionTab({
       for (const file of valid) {
         if (file.type === "application/pdf") {
           const pages = await pdfToImages(file);
-          next.push(...pages.map((page) => ({ ...page, id: crypto.randomUUID() })));
+          next.push(...pages.map((page) => ({ ...page, id: crypto.randomUUID(), status: "idle" as const })));
         } else {
-          next.push({ id: crypto.randomUUID(), name: file.name, dataUrl: await fileToDataUrl(file) });
+          next.push({ id: crypto.randomUUID(), name: file.name, dataUrl: await fileToDataUrl(file), status: "idle" });
         }
       }
       setImages((current) => [...current, ...next]);
@@ -74,51 +99,87 @@ export function RecognitionTab({
     }
   };
 
-  const recognize = async () => {
-    if (!images.length) return;
+  const recognizeImages = async (selectedImages: PendingImage[]) => {
+    if (!selectedImages.length || processing) return;
     if (!activeVisionAgent.apiKey) {
       toast.error(`Укажите API-ключ агента «${activeVisionAgent.name}» в настройках`);
       return;
     }
+
+    const selectedIds = new Set(selectedImages.map(({ id }) => id));
     setProcessing(true);
-    setProgress({ current: 0, total: images.length });
-    const successfulIds = new Set<string>();
-    const recognized: ExtractedRecord[] = [];
-    for (let index = 0; index < images.length; index += 1) {
-      const image = images[index];
-      setProgress({ current: index + 1, total: images.length });
-      try {
-        let compressed = await compressImage(image.dataUrl);
-        if (compressed.length > 11_000_000) compressed = await compressImage(image.dataUrl, 1400, 0.72);
-        const payload = await readApiResponse<unknown>(
-          await fetch("/api/extract", {
-            method: "POST",
-            headers: agentHeaders(activeVisionAgent),
-            body: JSON.stringify({ image: compressed, prompt: settings.extractionPrompt }),
-          }),
-        );
-        const parsed = extractedRecordResponseSchema.parse(payload);
-        recognized.push({
+    setProgress({ completed: 0, total: selectedImages.length });
+    setImages((current) => current.map((image) => (
+      selectedIds.has(image.id)
+        ? { ...image, status: "queued", error: undefined }
+        : image
+    )));
+
+    let successful = 0;
+    try {
+      await runPromisePool({
+        items: selectedImages,
+        concurrency: normalizeParallelRequests(settings.parallelRequests),
+        task: async (image) => {
+          setImages((current) => current.map((item) => (
+            item.id === image.id ? { ...item, status: "processing", error: undefined } : item
+          )));
+
+          let compressed = await compressImage(image.dataUrl);
+          if (compressed.length > 11_000_000) {
+            compressed = await compressImage(image.dataUrl, 1400, 0.72);
+          }
+          const payload = await readApiResponse<unknown>(
+            await fetchWithRateLimitRetry("/api/extract", {
+              method: "POST",
+              headers: agentHeaders(activeVisionAgent),
+              body: JSON.stringify({ image: compressed, prompt: settings.extractionPrompt }),
+            }),
+          );
+          const parsed = extractedRecordResponseSchema.parse(payload);
+          return {
           ...parsed,
           id: crypto.randomUUID(),
           sourceName: image.name,
           thumbnail: await createThumbnail(image.dataUrl),
-        });
-        successfulIds.add(image.id);
-      } catch (error) {
-        toast.error(`${image.name}: ${error instanceof Error ? error.message : "ошибка распознавания"}`);
-      }
+          } satisfies ExtractedRecord;
+        },
+        onSettled: (result, image) => {
+          if (result.status === "fulfilled") {
+            successful += 1;
+            onRecordsChange((current) => {
+              const next = [...current, result.value];
+              setSessionPage(Math.floor((next.length - 1) / SESSION_PAGE_SIZE));
+              return next;
+            });
+            setImages((current) => current.filter(({ id }) => id !== image.id));
+          } else {
+            const message = result.reason instanceof Error
+              ? result.reason.message
+              : "Неизвестная ошибка распознавания";
+            setImages((current) => current.map((item) => (
+              item.id === image.id ? { ...item, status: "error", error: message } : item
+            )));
+          }
+          setProgress((current) => ({
+            ...current,
+            completed: current.completed + 1,
+          }));
+        },
+      });
+
+      if (successful > 0) toast.success(`Распознано документов: ${successful}`);
+      const failed = selectedImages.length - successful;
+      if (failed > 0) toast.warning(`Не распознано страниц: ${failed}`);
+    } finally {
+      setProcessing(false);
     }
-    if (recognized.length) {
-      onRecordsChange([...records, ...recognized]);
-      setImages((current) => current.filter((image) => !successfulIds.has(image.id)));
-      toast.success(`Распознано документов: ${recognized.length}`);
-    }
-    setProcessing(false);
   };
 
   const updateRecord = (id: string, field: RecordField, value: string) => {
-    onRecordsChange(records.map((record) => (record.id === id ? { ...record, [field]: value } : record)));
+    onRecordsChange((current) => current.map((record) => (
+      record.id === id ? { ...record, [field]: value } : record
+    )));
   };
 
   const exportJson = () => {
@@ -127,6 +188,24 @@ export function RecognitionTab({
 
   const exportCsv = () => {
     downloadBlob(new Blob([recordsToCsv(records)], { type: "text/csv;charset=utf-8" }), "session.csv");
+  };
+
+  const importJson = async (file: File) => {
+    if (file.size > MAX_FILE_SIZE) {
+      toast.error(`${file.name}: JSON больше 20 МБ`);
+      return;
+    }
+    setImportingJson(true);
+    try {
+      const imported = parseRecognitionSession(JSON.parse(await file.text()), () => crypto.randomUUID());
+      onRecordsChange((current) => [...current, ...imported]);
+      setSessionPage(Math.floor(records.length / SESSION_PAGE_SIZE));
+      toast.success(`Импортировано записей: ${imported.length}`);
+    } catch {
+      toast.error("Не удалось импортировать JSON: выберите файл, экспортированный из сессии распознавания");
+    } finally {
+      setImportingJson(false);
+    }
   };
 
   return (
@@ -169,26 +248,61 @@ export function RecognitionTab({
           <>
             <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
               {images.map((image) => (
-                <div className="group relative aspect-[4/3] overflow-hidden rounded-md border border-[#d8e2de] bg-[#eef2f0]" key={image.id}>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img className="h-full w-full object-cover" src={image.dataUrl} alt={image.name} />
-                  <div className="absolute inset-x-0 bottom-0 truncate bg-black/65 px-2 py-1 text-xs text-white">{image.name}</div>
-                  <button
-                    className="absolute right-1 top-1 rounded bg-white/95 p-1 text-[#33413d] opacity-100 shadow-sm sm:opacity-0 sm:group-hover:opacity-100"
-                    title="Удалить изображение"
-                    onClick={() => setImages((current) => current.filter(({ id }) => id !== image.id))}
-                  >
-                    <X className="size-4" />
-                  </button>
+                <div
+                  className={cn(
+                    "group overflow-hidden rounded-md border bg-[#eef2f0]",
+                    image.status === "error" ? "border-[#dc7468] bg-[#fff6f4]" : "border-[#d8e2de]",
+                  )}
+                  key={image.id}
+                >
+                  <div className="relative aspect-[4/3] overflow-hidden">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img className="h-full w-full object-cover" src={image.dataUrl} alt={image.name} />
+                    <div className="absolute inset-x-0 bottom-0 truncate bg-black/65 px-2 py-1 text-xs text-white">{image.name}</div>
+                    {(image.status === "queued" || image.status === "processing") && (
+                      <div className="absolute inset-0 grid place-items-center bg-[#153c33]/75 text-white">
+                        <div className="flex flex-col items-center gap-2 text-xs font-medium">
+                          <LoaderCircle className={cn("size-5", image.status === "processing" && "animate-spin")} />
+                          {image.status === "processing" ? "Распознавание" : "В очереди"}
+                        </div>
+                      </div>
+                    )}
+                    {image.status !== "queued" && image.status !== "processing" && (
+                      <button
+                        type="button"
+                        className="absolute right-1 top-1 rounded bg-white/95 p-1 text-[#33413d] opacity-100 shadow-sm sm:opacity-0 sm:group-hover:opacity-100"
+                        title="Удалить изображение"
+                        onClick={() => setImages((current) => current.filter(({ id }) => id !== image.id))}
+                      >
+                        <X className="size-4" />
+                      </button>
+                    )}
+                  </div>
+                  {image.status === "error" && (
+                    <div className="space-y-2 border-t border-[#efb1aa] p-2.5 text-[#8e3028]">
+                      <p className="flex items-start gap-1.5 text-xs leading-4">
+                        <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
+                        <span className="break-words">{image.error}</span>
+                      </p>
+                      <button
+                        type="button"
+                        disabled={processing}
+                        className="inline-flex h-8 items-center gap-1.5 rounded border border-[#d98b82] bg-white px-2.5 text-xs font-medium text-[#8e3028] hover:bg-[#fff0ed] disabled:cursor-not-allowed disabled:opacity-50"
+                        onClick={() => void recognizeImages([image])}
+                      >
+                        <RefreshCw className="size-3.5" /> Повторить
+                      </button>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
             <div className="mt-5 flex flex-wrap items-center gap-4">
-              <Button loading={processing} onClick={recognize}><ScanText className="size-4" /> Распознать всё</Button>
+              <Button loading={processing} onClick={() => void recognizeImages(images)}><ScanText className="size-4" /> Распознать всё</Button>
               {processing && (
                 <div className="min-w-52 flex-1">
-                  <div className="mb-1 flex justify-between text-xs text-[#65736f]"><span>Обработка</span><span>{progress.current} из {progress.total}</span></div>
-                  <div className="h-2 overflow-hidden rounded bg-[#dce7e3]"><div className="h-full bg-[#23816e] transition-all" style={{ width: `${(progress.current / progress.total) * 100}%` }} /></div>
+                  <div className="mb-1 flex justify-between text-xs text-[#65736f]"><span>Завершено</span><span>{progress.completed} из {progress.total}</span></div>
+                  <div className="h-2 overflow-hidden rounded bg-[#dce7e3]"><div className="h-full bg-[#23816e] transition-all" style={{ width: `${(progress.completed / progress.total) * 100}%` }} /></div>
                 </div>
               )}
             </div>
@@ -200,31 +314,54 @@ export function RecognitionTab({
         <div className="border-b border-[#e1e8e5] p-5">
           <SectionTitle
             title={`Сессия распознавания · ${records.length}`}
-            description="Поля можно исправить вручную перед передачей в Excel."
+            description="Поля можно исправить вручную перед передачей в Excel или восстановить из ранее сохранённого JSON."
           />
-          {records.length > 0 && (
-            <div className="mt-4 flex flex-wrap gap-2">
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Button variant="secondary" loading={importingJson} onClick={() => jsonInputRef.current?.click()}><UploadCloud className="size-4" /> Импорт JSON</Button>
+            <input
+              ref={jsonInputRef}
+              className="hidden"
+              type="file"
+              accept=".json,application/json"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) void importJson(file);
+                event.currentTarget.value = "";
+              }}
+            />
+            {records.length > 0 && (
+              <>
               <Button variant="secondary" onClick={exportJson}><FileJson className="size-4" /> Экспорт JSON</Button>
               <Button variant="secondary" onClick={exportCsv}><Download className="size-4" /> Экспорт CSV</Button>
               <Button
                 variant="danger"
                 onClick={() => {
-                  if (window.confirm("Очистить всю распознанную сессию?")) onRecordsChange([]);
+                  if (window.confirm("Очистить всю распознанную сессию?")) {
+                    onRecordsChange([]);
+                    setSessionPage(0);
+                  }
                 }}
               ><Trash2 className="size-4" /> Очистить сессию</Button>
               <Button className="sm:ml-auto" onClick={onSendToExcel}>Отправить в Excel <ArrowRight className="size-4" /></Button>
-            </div>
-          )}
+              </>
+            )}
+          </div>
         </div>
         {records.length === 0 ? (
           <EmptyState icon={<FileImage className="size-8" />} title="Сессия пока пуста" text="Загрузите документы и запустите распознавание. Результаты сохранятся в этом браузере." />
         ) : (
           <div className="divide-y divide-[#e4ebe8]">
-            {records.map((record) => (
+            {visibleRecords.map((record) => (
               <article className="grid gap-5 p-5 md:grid-cols-[150px_1fr]" key={record.id}>
                 <div>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img className="aspect-[4/3] w-full rounded-md border border-[#dce5e1] object-cover" src={record.thumbnail} alt={record.sourceName} />
+                  {record.thumbnail ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img className="aspect-[4/3] w-full rounded-md border border-[#dce5e1] object-cover" src={record.thumbnail} alt={record.sourceName} />
+                  ) : (
+                    <div className="grid aspect-[4/3] w-full place-items-center rounded-md border border-[#dce5e1] bg-[#f4f7f5] text-[#7b8985]">
+                      <FileJson className="size-8" />
+                    </div>
+                  )}
                   <p className="mt-2 break-words text-xs text-[#71807b]">{record.sourceName}</p>
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2">
@@ -244,6 +381,17 @@ export function RecognitionTab({
                 </div>
               </article>
             ))}
+            {sessionPageCount > 1 && (
+              <div className="flex flex-wrap items-center justify-center gap-3 p-4">
+                <Button variant="secondary" className="h-9 px-2.5" disabled={activeSessionPage === 0} onClick={() => setSessionPage(activeSessionPage - 1)} title="Предыдущая страница">
+                  <ChevronLeft className="size-4" />
+                </Button>
+                <span className="text-sm text-[#61706b]">Страница {activeSessionPage + 1} из {sessionPageCount}</span>
+                <Button variant="secondary" className="h-9 px-2.5" disabled={activeSessionPage >= sessionPageCount - 1} onClick={() => setSessionPage(activeSessionPage + 1)} title="Следующая страница">
+                  <ChevronRight className="size-4" />
+                </Button>
+              </div>
+            )}
           </div>
         )}
       </Card>

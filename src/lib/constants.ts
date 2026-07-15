@@ -1,8 +1,12 @@
 import type { AppSettings, ColumnMapping } from "@/lib/types";
 
+export const DEFAULT_PARALLEL_REQUESTS = 4;
+export const MIN_PARALLEL_REQUESTS = 1;
+export const MAX_PARALLEL_REQUESTS = 8;
+
 export const DEFAULT_EXTRACTION_PROMPT = `Твоя задача — распознать текст на фото заявления/обращения. Извлеки следующие данные:
 - Тема обращения: что человек просит (кратко, своими словами, 1 фраза)
-- ФИО: полностью, как написано
+- ФИО: полностью, в порядке «Фамилия Имя Отчество»
 - Дата рождения
 - Адрес
 - Телефон
@@ -17,6 +21,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     model: "cx/gpt-5.5-review",
   }],
   activeVisionAgentId: "default-vision-agent",
+  parallelRequests: DEFAULT_PARALLEL_REQUESTS,
   table: {
     baseUrl: "https://routerai.ru/api/v1",
     apiKey: "",
@@ -28,6 +33,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
 export const EMPTY_MAPPING: ColumnMapping = {
   topic: null,
   full_name: null,
+  last_name: null,
+  first_name: null,
+  middle_name: null,
   birth_date: null,
   address: null,
   phone: null,

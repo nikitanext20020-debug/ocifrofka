@@ -23,14 +23,19 @@ export const extractedRecordResponseSchema = z.object({
 
 const nullableColumnSchema = z.number().int().nonnegative().nullable();
 
+export const columnMappingSchema = z.object({
+  topic: nullableColumnSchema,
+  full_name: nullableColumnSchema.default(null),
+  last_name: nullableColumnSchema.default(null),
+  first_name: nullableColumnSchema.default(null),
+  middle_name: nullableColumnSchema.default(null),
+  birth_date: nullableColumnSchema,
+  address: nullableColumnSchema,
+  phone: nullableColumnSchema,
+});
+
 export const tableAnalysisSchema = z.object({
-  mapping: z.object({
-    topic: nullableColumnSchema,
-    full_name: nullableColumnSchema,
-    birth_date: nullableColumnSchema,
-    address: nullableColumnSchema,
-    phone: nullableColumnSchema,
-  }),
+  mapping: columnMappingSchema,
   formats: z.object({
     topic: z.string(),
     full_name: z.string(),

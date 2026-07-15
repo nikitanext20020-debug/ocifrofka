@@ -3,8 +3,12 @@
 import { useState } from "react";
 import { CheckCircle2, CirclePlus, Eye, EyeOff, RotateCcw, Save, ServerCog, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import { DEFAULT_EXTRACTION_PROMPT } from "@/lib/constants";
-import { createEmptyVisionAgent } from "@/lib/vision-agents";
+import {
+  DEFAULT_EXTRACTION_PROMPT,
+  MAX_PARALLEL_REQUESTS,
+  MIN_PARALLEL_REQUESTS,
+} from "@/lib/constants";
+import { createEmptyVisionAgent, normalizeParallelRequests } from "@/lib/vision-agents";
 import type { AgentConfig, AppSettings, VisionAgent } from "@/lib/types";
 import { agentHeaders, readApiResponse } from "@/lib/utils";
 import { Button, Card, Input, SectionTitle } from "@/components/ui";
@@ -188,6 +192,30 @@ export function SettingsTab({ settings, onChange }: { settings: AppSettings; onC
           />
         ))}
       </section>
+      <Card className="p-5">
+        <SectionTitle
+          title="Производительность распознавания"
+          description="Настройте число изображений, которые обрабатываются одновременно."
+        />
+        <label className="mt-5 block max-w-sm">
+          <span className="mb-1.5 block text-sm font-medium">Параллельные запросы</span>
+          <Input
+            className="w-32"
+            type="number"
+            min={MIN_PARALLEL_REQUESTS}
+            max={MAX_PARALLEL_REQUESTS}
+            step={1}
+            value={normalizeParallelRequests(draft.parallelRequests)}
+            onChange={(event) => setDraft((current) => ({
+              ...current,
+              parallelRequests: normalizeParallelRequests(Number(event.target.value)),
+            }))}
+          />
+          <span className="mt-1.5 block text-xs leading-5 text-[#71807b]">
+            От {MIN_PARALLEL_REQUESTS} до {MAX_PARALLEL_REQUESTS}. Чем выше значение, тем быстрее обработка, но тем вероятнее лимиты провайдера.
+          </span>
+        </label>
+      </Card>
       <AgentSection title="Excel-агент" description="Анализирует структуру таблицы и возвращает только точечные изменения." value={draft.table} onChange={(table) => setDraft((current) => ({ ...current, table }))} models={["deepseek/deepseek-v4-flash", "x-ai/grok-4.5"]} />
       <Card className="p-5">
         <SectionTitle title="Промт распознавания" description="Используется как system prompt для каждого изображения." action={<Button variant="secondary" onClick={() => setDraft((current) => ({ ...current, extractionPrompt: DEFAULT_EXTRACTION_PROMPT }))}><RotateCcw className="size-4" /> Сбросить к стандартному</Button>} />

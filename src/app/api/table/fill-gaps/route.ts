@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { apiError, callStructured, readAgentConfig } from "@/lib/model-client";
 import { cellChangesSchema } from "@/lib/schemas";
+import { isEmptyCell } from "@/lib/table-utils";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -18,7 +19,15 @@ export async function POST(request: Request) {
   try {
     const config = readAgentConfig(request);
     const body = bodySchema.parse(await request.json());
-    const allowed = new Set(body.gaps.map(({ row, column }) => `${row}:${column}`));
+    const rowsByIndex = new Map(body.rows.map(({ row, values }) => [row, values]));
+    const safeGaps = body.gaps.filter(({ row, column }) => {
+      const values = rowsByIndex.get(row);
+      return column < body.headers.length && values !== undefined && isEmptyCell(values[column]);
+    });
+    if (!safeGaps.length) {
+      return Response.json({ error: "В выбранных новых строках нет доступных пустых ячеек." }, { status: 400 });
+    }
+    const allowed = new Set(safeGaps.map(({ row, column }) => `${row}:${column}`));
     const result = await callStructured({
       config,
       schema: cellChangesSchema,
@@ -26,13 +35,13 @@ export async function POST(request: Request) {
         {
           role: "system",
           content: [
-            "Заполни только перечисленные gaps правдоподобными синтетическими значениями в стиле examples и formats. Индексы row и column абсолютные, не меняй их. Верни JSON {changes:[{row,column,value}]}. Не возвращай таблицу целиком.",
+            "В rows переданы только строки, только что добавленные из распознавания. Заполни только перечисленные gaps правдоподобными синтетическими значениями в стиле examples и formats. Никогда не изменяй заполненные ячейки и любые строки, отсутствующие в rows. Индексы row и column абсолютные, не меняй их. Верни JSON {changes:[{row,column,value}]}. Не возвращай таблицу целиком.",
             Object.keys(body.categoricals).length > 0
               ? `\nКатегориальные колонки — используй ТОЛЬКО указанные значения (выбери наиболее подходящее по смыслу, или «-» если ни одно не подходит):\n${Object.entries(body.categoricals).map(([header, values]) => `- «${header}»: [${values.map((v) => `«${v}»`).join(", ")}]`).join("\n")}`
               : "",
           ].join(""),
         },
-        { role: "user", content: JSON.stringify(body) },
+        { role: "user", content: JSON.stringify({ ...body, gaps: safeGaps }) },
       ],
     });
     const changes = result.changes.filter((change) => allowed.has(`${change.row}:${change.column}`));
