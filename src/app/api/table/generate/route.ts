@@ -21,6 +21,15 @@ const bodySchema = z.object({
 
 class GeneratedRowsError extends Error {}
 
+const TEXT_STRUCTURES = [
+  "сначала конкретный факт или неудобство, затем практичное действие",
+  "сначала прямое действие, затем конкретное последствие нынешней проблемы",
+  "сначала кто сталкивается с трудностью, затем какое изменение поможет",
+  "сначала когда или при каких обстоятельствах возникает проблема, затем что изменить",
+  "сначала что перестало справляться или устарело, затем чем это заменить или дополнить",
+  "сначала короткое наблюдение, затем ожидаемый результат без слов «нужно» и «необходимо»",
+] as const;
+
 function normalized(value: unknown) {
   return String(value ?? "")
     .toLocaleLowerCase("ru-RU")
@@ -78,6 +87,11 @@ function validateTopicVariety(rows: string[][], headers: string[], examples: unk
 
   if (texts.length < 5) return;
   const starts = normalizedTexts.map((text) => (text.match(/[a-zа-я0-9]+/gi) ?? []).slice(0, 2));
+  const firstWords = starts.map(([first = ""]) => first);
+  const imperativeStarts = firstWords.filter((word) => /(?:йте|ите|ьте)$/.test(word)).length;
+  if (imperativeStarts > Math.ceil(texts.length * 0.4)) {
+    throw new GeneratedRowsError("Слишком много обращений начинаются с повелительного глагола.");
+  }
   const prepositionStarts = starts.filter(([first]) => ["в", "во", "на"].includes(first)).length;
   if (prepositionStarts > Math.ceil(texts.length * 0.4)) {
     throw new GeneratedRowsError("Слишком много обращений начинаются с «В», «Во» или «На».");
@@ -90,6 +104,19 @@ function validateTopicVariety(rows: string[][], headers: string[], examples: unk
   }
   if ([...startCounts.values()].some((count) => count > 2)) {
     throw new GeneratedRowsError("Модель слишком часто повторила одинаковое начало обращения.");
+  }
+
+  const structureBuckets = firstWords.map((word) => {
+    if (/(?:йте|ите|ьте)$/.test(word)) return "imperative";
+    if (["в", "во", "на"].includes(word)) return "location";
+    if (["после", "когда", "каждый", "каждое", "зимой", "летом", "утром", "вечером", "сейчас"].includes(word)) return "circumstance";
+    if (["детям", "жителям", "родителям", "пассажирам", "водителям", "пешеходам", "пожилым", "школьникам"].includes(word)) return "people";
+    return "other";
+  });
+  const bucketCounts = new Map<string, number>();
+  structureBuckets.forEach((bucket) => bucketCounts.set(bucket, (bucketCounts.get(bucket) ?? 0) + 1));
+  if (bucketCounts.size < 3 || [...bucketCounts.values()].some((count) => count > Math.ceil(texts.length * 0.55))) {
+    throw new GeneratedRowsError("В подборке доминирует одна и та же конструкция предложений.");
   }
 }
 
@@ -147,9 +174,9 @@ export async function POST(request: Request) {
             " Не копируй из examples ФИО, адреса, телефоны, электронную почту или целые обращения. Все записи должны отличаться друг от друга и от примеров.",
             " ФИО должны быть вымышленными, но грамматически согласованными. Телефоны, даты рождения, адреса и остальные поля оформляй точно в стиле examples.",
             " Для текста обращения соблюдай пользовательскую инструкцию и стиль примеров, но создавай новый текст.",
-            " Каждый текст должен состоять ровно из двух коротких предложений: сначала прямое действие или просьба, затем конкретная причина. Пиши разговорно, спокойно и без канцелярита.",
+            " Каждый текст должен состоять ровно из двух коротких предложений. Меняй порядок: не ставь прямое действие первым в каждой строке. Пиши разговорно, спокойно и без канцелярита.",
             " Не начинай с «Нельзя», «Почему», «Лучше», «Нам бы», «Если можно», «В нашем», «У нас в», «Просим», «Очень просим», «Нужно» или «Необходимо». Не штампуй начала с «В», «Во» и названия населённого пункта. «Хотелось бы» и «Очень ждут» используй не более 1–2 раз во всей подборке.",
-            " Формулируй действие прямо и меняй глаголы, порядок слов и ритм. Не копируй соседний текст, заменяя только улицу, город или объект. Не используй длинное тире.",
+            " Не более 40% текстов могут начинаться с повелительного глагола. Используй минимум три разных типа начала: действие, обстоятельство, люди, конкретный факт или наблюдение. Не копируй соседний текст, заменяя только улицу, город или объект. Не используй длинное тире.",
             " Не добавляй политическую принадлежность от имени вымышленных людей: если для колонки вовлечённости доступно значение «Иное», используй его.",
             " Не добавляй пояснений, Markdown и заголовков.",
             `\nЗаголовки по порядку:\n${body.headers.map((header, index) => `${index}: ${header}`).join("\n")}`,
@@ -161,6 +188,7 @@ export async function POST(request: Request) {
               ? `\nФиксированные значения колонок:\n${Object.entries(body.fixedValues).map(([header, value]) => `- ${header}: «${value}»`).join("\n")}`
               : "",
             body.instruction.trim() ? `\nДополнительная инструкция пользователя:\n${body.instruction.trim()}` : "",
+            `\nСтруктурный план текстов по порядку строк. Не копируй формулировку плана в результат:\n${Array.from({ length: body.count }, (_, index) => `${index + 1}: ${TEXT_STRUCTURES[(index * 5 + (retry ? 1 : 0)) % TEXT_STRUCTURES.length]}`).join("\n")}`,
             retry ? "\nПредыдущий вариант оказался слишком шаблонным или нарушил формат. Полностью перепиши строки, особенно начала обращений, и строго соблюдай два коротких предложения." : "",
           ].join(""),
         },
