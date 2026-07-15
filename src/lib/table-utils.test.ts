@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendRecords, applyCellChanges, applyFixedColumnValues, applyRecordCategories, findGapCells, findInsertRow, markSyntheticRowsForExport, mergeRecordsAt, normalizeTable, recordsToCsv, splitFullName } from "@/lib/table-utils";
+import { appendRecords, applyCellChanges, applyFixedColumnValues, applyRecordCategories, findGapCells, findInsertRow, markSyntheticRowsForExport, mergeGeneratedRowsAt, mergeRecordsAt, normalizeTable, recordsToCsv, splitFullName } from "@/lib/table-utils";
 import type { ColumnMapping, ExtractedRecord } from "@/lib/types";
 
 describe("normalizeTable", () => {
@@ -29,6 +29,22 @@ describe("normalizeTable", () => {
       headers: ["ФИО", "Телефон"],
       rows: [["Иванов", "7999"]],
     });
+  });
+});
+
+describe("mergeGeneratedRowsAt", () => {
+  it("fills empty cells, preserves template values, and grows the table", () => {
+    const result = mergeGeneratedRowsAt(
+      { headers: ["Муниципалитет", "ФИО"], rows: [["Богородский г.о.", ""]] },
+      [["Нельзя заменить", "Тестов Иван"], ["Богородский г.о.", "Примеров Пётр"]],
+      0,
+    );
+
+    expect(result.rows).toEqual([
+      ["Богородский г.о.", "Тестов Иван"],
+      ["Богородский г.о.", "Примеров Пётр"],
+    ]);
+    expect(result.writtenRows).toEqual([0, 1]);
   });
 });
 
