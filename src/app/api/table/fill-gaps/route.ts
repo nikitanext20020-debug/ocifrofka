@@ -2,6 +2,7 @@ import { z } from "zod";
 import { apiError, callStructured, readAgentConfig } from "@/lib/model-client";
 import { cellChangesSchema } from "@/lib/schemas";
 import { isBriefRecognizedText, isEmptyCell } from "@/lib/table-utils";
+import { normalizeBirthDate } from "@/lib/date-utils";
 import type { CellChange } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -33,6 +34,7 @@ function acceptedChanges(
   gaps: Gap[],
   headers: string[],
   categoricals: Record<string, string[]>,
+  birthDateFormat: string,
 ) {
   const allowed = new Set(gaps.map(({ row, column }) => cellKey(row, column)));
   const accepted = new Map<string, CellChange>();
@@ -50,6 +52,10 @@ function acceptedChanges(
       const canonical = allowedValues.find((candidate) => normalizedValue(candidate) === normalizedValue(value));
       if (!canonical) continue;
       value = canonical;
+    }
+
+    if (normalizedValue(header).includes("дата рождения")) {
+      value = normalizeBirthDate(value, birthDateFormat);
     }
 
     accepted.set(key, { ...change, value });
@@ -87,6 +93,7 @@ async function generateChanges(
           " Не изменяй строки и ячейки, которых нет в gaps. Индексы row и column абсолютные и должны остаться без изменений.",
           " Если «Текст наказа» содержит одно-два общих слова, например «спорт», «ЖКХ», «дороги» или «благоустройство», разверни их в правдоподобный конкретный текст обращения в стиле examples.",
           " Колонки «Тематика предложения»/«Тематика обращения» и «Направление обращения» определяй по тексту наказа в той же строке. Для каждой такой колонки обязательно выбери ровно одно значение из соответствующего списка.",
+          " Любую дату рождения возвращай строго в формате ДД.ММ.ГГГГ, например 18.09.2001.",
           " Верни только JSON вида {changes:[{row,column,value}]}. Пары row/column не должны повторяться.",
           retry ? " Это повторная попытка: в gaps оставлены только пропущенные или недопустимые ячейки. Заполни их все." : "",
           Object.keys(body.categoricals).length > 0
@@ -126,14 +133,15 @@ export async function POST(request: Request) {
       return Response.json({ error: "В выбранных новых строках нет доступных ячеек." }, { status: 400 });
     }
 
+    const birthDateFormat = body.formats.birth_date ?? "DD.MM.YYYY";
     const first = await generateChanges(config, body, body.rows, safeGaps);
-    const accepted = acceptedChanges(first.changes, safeGaps, body.headers, body.categoricals);
+    const accepted = acceptedChanges(first.changes, safeGaps, body.headers, body.categoricals, birthDateFormat);
     let missing = safeGaps.filter(({ row, column }) => !accepted.has(cellKey(row, column)));
 
     if (missing.length) {
       const retryRows = rowsWithChanges(body.rows, accepted.values());
       const second = await generateChanges(config, body, retryRows, missing, true);
-      const retryAccepted = acceptedChanges(second.changes, missing, body.headers, body.categoricals);
+      const retryAccepted = acceptedChanges(second.changes, missing, body.headers, body.categoricals, birthDateFormat);
       for (const [key, change] of retryAccepted) accepted.set(key, change);
       missing = safeGaps.filter(({ row, column }) => !accepted.has(cellKey(row, column)));
     }
