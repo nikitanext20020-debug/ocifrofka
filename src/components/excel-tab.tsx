@@ -463,7 +463,7 @@ export function ExcelTab({
           .map(([rawColumn, value]) => [table.headers[Number(rawColumn)], value] as const)
           .filter(([header, value]) => Boolean(header && value)),
       );
-      const result = await readApiResponse<{ rows: string[][] }>(
+      const result = await readApiResponse<{ rows: string[][]; warning?: string }>(
         await fetch("/api/table/generate", {
           method: "POST",
           headers: agentHeaders(settings.table),
@@ -492,6 +492,7 @@ export function ExcelTab({
       if (merged.writtenRows.length) showTablePage(Math.floor(merged.writtenRows[0] / TABLE_PAGE_SIZE));
       setNotice(`Создано синтетических тестовых строк: ${merged.writtenRows.length}. При скачивании они будут явно помечены.`);
       toast.success(`Создано тестовых строк: ${merged.writtenRows.length}`);
+      if (result.warning) toast.warning(result.warning);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Не удалось создать тестовые строки");
     } finally {
