@@ -59,6 +59,10 @@ function isDerivedCategoryHeader(value: string) {
   return header === "тематика предложения" || header === "тематика обращения" || header === "направление обращения";
 }
 
+function isGeneratedColumnHeader(value: string) {
+  return /^колонка \d+$/.test(normalizedHeader(value));
+}
+
 function isNamePartField(field: MappableField): field is NamePartField {
   return (NAME_PART_FIELDS as readonly string[]).includes(field);
 }
@@ -242,7 +246,8 @@ export function ExcelTab({
       );
       // Compute categoricals client-side from ALL rows (no model needed)
       const categoricals: Record<number, string[]> = {};
-      table.headers.forEach((_, colIndex) => {
+      table.headers.forEach((header, colIndex) => {
+        if (isGeneratedColumnHeader(header)) return;
         const valueSet = new Set<string>();
         for (const row of table.rows) {
           const val = String(row[colIndex] ?? "").trim();
