@@ -39,9 +39,17 @@ function valuesForMapping(record: Record<RecordField, string>) {
 
 export function normalizeTable(matrix: unknown[][]): TableData {
   if (matrix.length === 0) return { headers: [], rows: [] };
-  const width = Math.max(...matrix.map((row) => row.length), 0);
   const headerRowIndex = findDescriptiveHeaderRowIndex(matrix);
   const rawHeaders = matrix[headerRowIndex] ?? [];
+  const lastNamedColumn = rawHeaders.reduce<number>(
+    (last, value, index) => String(value ?? "").trim() ? index : last,
+    -1,
+  );
+  // A few source workbooks contain stray cells to the right of the actual
+  // table. They must not create fake unnamed columns in the application.
+  const width = lastNamedColumn >= 0
+    ? lastNamedColumn + 1
+    : Math.max(...matrix.map((row) => row.length), 0);
   const headers = Array.from({ length: width }, (_, index) => {
     const value = String(rawHeaders[index] ?? "").trim();
     return value || `Колонка ${index + 1}`;
