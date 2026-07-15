@@ -12,6 +12,22 @@ import { findDescriptiveHeaderRowIndex } from "@/lib/column-mapping";
 
 const MAPPABLE_FIELDS = [...RECORD_FIELDS, ...NAME_PART_FIELDS] as const;
 
+function normalizedHeader(value: string) {
+  return value.toLocaleLowerCase("ru-RU").replaceAll("ё", "е").replace(/[^a-zа-я0-9]+/gi, " ").trim();
+}
+
+function isDerivedCategoryHeader(value: string) {
+  const header = normalizedHeader(value);
+  return header === "тематика предложения" || header === "тематика обращения" || header === "направление обращения";
+}
+
+export function isBriefRecognizedText(value: unknown) {
+  const normalized = String(value ?? "").trim().replace(/\s+/g, " ");
+  if (!normalized || normalized === "-") return false;
+  const words = normalized.match(/[a-zа-яё0-9]+/gi) ?? [];
+  return words.length > 0 && words.length <= 2 && normalized.length <= 40;
+}
+
 export function splitFullName(value: string): Record<NamePartField, string> {
   const normalized = value.trim().replace(/\s+/g, " ");
   if (!normalized || normalized === "-") {
@@ -90,13 +106,14 @@ export function applyCellChanges(
   const applied: CellChange[] = [];
   for (const change of changes) {
     const key = `${change.row}:${change.column}`;
+    const explicitlyAllowed = allowed?.has(key) ?? false;
     if (
       change.row < 0 ||
       change.row >= next.length ||
       change.column < 0 ||
       change.column >= (next[change.row]?.length ?? 0) ||
-      (allowed && !allowed.has(key)) ||
-      (emptyOnly && !isEmptyCell(next[change.row][change.column]))
+      (allowed && !explicitlyAllowed) ||
+      (emptyOnly && !isEmptyCell(next[change.row][change.column]) && !explicitlyAllowed)
     ) {
       continue;
     }
@@ -182,15 +199,37 @@ export function findGapCells(
   const mappedColumns = [...new Set(Object.values(mapping).filter(
     (column): column is number => column !== null,
   ))];
+  const derivedCategoryColumns = table.headers
+    .map((header, column) => ({ header, column }))
+    .filter(({ header }) => isDerivedCategoryHeader(header))
+    .map(({ column }) => column);
   const gaps: Array<{ row: number; column: number }> = [];
+  const seen = new Set<string>();
+  const addTarget = (row: number, column: number) => {
+    const key = `${row}:${column}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    gaps.push({ row, column });
+  };
+
   for (const rowIndex of [...new Set(targetRows)]) {
     const row = table.rows[rowIndex];
     if (!row) continue;
     mappedColumns.forEach((column) => {
       if (column < table.headers.length && isEmptyCell(row[column])) {
-        gaps.push({ row: rowIndex, column });
+        addTarget(rowIndex, column);
       }
     });
+
+    const topicColumn = mapping.topic;
+    if (topicColumn === null || topicColumn >= table.headers.length) continue;
+    const topicIsMissing = isEmptyCell(row[topicColumn]);
+    const topicIsBrief = isBriefRecognizedText(row[topicColumn]);
+    if (topicIsBrief) addTarget(rowIndex, topicColumn);
+
+    if (topicIsMissing || topicIsBrief) {
+      derivedCategoryColumns.forEach((column) => addTarget(rowIndex, column));
+    }
   }
   return gaps;
 }
