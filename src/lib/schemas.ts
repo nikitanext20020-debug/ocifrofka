@@ -53,6 +53,7 @@ export const normalizedRecordsSchema = z.object({
       birth_date: recordValueSchema,
       address: recordValueSchema,
       phone: recordValueSchema,
+      categories: z.record(z.string(), recordValueSchema).optional().default({}),
     }),
   ),
 });

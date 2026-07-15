@@ -17,6 +17,11 @@ const bodySchema = z.object({
   records: z.array(recordSchema).min(1).max(200),
   formats: z.record(z.string(), z.string()),
   categoricals: z.record(z.string(), z.array(z.string())).optional().default({}),
+  categoryColumns: z.array(z.object({
+    column: z.number().int().nonnegative(),
+    header: z.string(),
+    values: z.array(z.string()).min(1).max(50),
+  })).max(10).optional().default([]),
 });
 
 export async function POST(request: Request) {
@@ -30,10 +35,13 @@ export async function POST(request: Request) {
         {
           role: "system",
           content: [
-            "Приведи значения записей к указанным форматам таблицы. Не выдумывай отсутствующие данные и не меняй смысл. Верни JSON {records:[...]}, сохрани порядок и число записей. Поле full_name всегда возвращай полностью и в порядке «Фамилия Имя Отчество»: не оставляй только фамилию, даже если в целевой таблице фамилия, имя и отчество находятся в отдельных колонках — приложение разделит их самостоятельно.",
+            "Приведи значения записей к указанным форматам таблицы. Не выдумывай отсутствующие данные и не меняй смысл. Верни JSON {records:[...]}, сохрани порядок и число записей. Поле topic — это исходный «Текст наказа» для колонки M: сохрани его смысл и не заменяй значением тематической категории. Поле full_name всегда возвращай полностью и в порядке «Фамилия Имя Отчество»: не оставляй только фамилию, даже если в целевой таблице фамилия, имя и отчество находятся в отдельных колонках — приложение разделит их самостоятельно. В каждой записи верни также объект categories.",
             Object.keys(body.categoricals).length > 0
-              ? `\nДля следующих полей допустимы ТОЛЬКО указанные значения (выбери наиболее подходящее по смыслу). Если ни одно не подходит — ставь «-»:\n${Object.entries(body.categoricals).map(([field, values]) => `- ${field}: [${values.map((v) => `«${v}»`).join(", ")}]`).join("\n")}`
+              ? `\nДля следующих полей допустимы ТОЛЬКО указанные значения. Если исходное поле заполнено, ОБЯЗАТЕЛЬНО выбери наиболее близкое по смыслу значение из списка и никогда не ставь «-». Прочерк допустим только когда исходное поле само пустое или равно «-»:\n${Object.entries(body.categoricals).map(([field, values]) => `- ${field}: [${values.map((v) => `«${v}»`).join(", ")}]`).join("\n")}`
               : "",
+            body.categoryColumns.length > 0
+              ? `\nНа основе поля topic каждой записи классифицируй её по производным колонкам. В categories ключом должен быть номер column как строка, а значением — ровно одно значение из соответствующего списка. Верни все перечисленные колонки для каждой записи:\n${body.categoryColumns.map(({ column, header, values }) => `- categories["${column}"] для «${header}»: [${values.map((v) => `«${v}»`).join(", ")}]`).join("\n")}`
+              : "\nДля каждой записи верни categories: {}.",
           ].join(""),
         },
         { role: "user", content: JSON.stringify(body) },
@@ -42,6 +50,21 @@ export async function POST(request: Request) {
     if (result.records.length !== body.records.length) {
       return Response.json({ error: "Модель изменила число записей. Повторите вставку." }, { status: 502 });
     }
+    const allowed = new Map(body.categoryColumns.map(({ column, values }) => [String(column), new Set(values)]));
+    if (allowed.size > 0) {
+      const invalid = result.records.some(({ categories }) =>
+        [...allowed].some(([column, values]) => !values.has(categories[column])),
+      );
+      if (invalid) {
+        return Response.json({ error: "Модель не смогла выбрать тематику или направление из списка. Повторите вставку." }, { status: 502 });
+      }
+    }
+    result.records = result.records.map((record) => ({
+      ...record,
+      categories: Object.fromEntries(
+        Object.entries(record.categories).filter(([column, value]) => allowed.get(column)?.has(value)),
+      ),
+    }));
     return Response.json(result);
   } catch (error) {
     if (error instanceof z.ZodError) {

@@ -76,11 +76,13 @@ export type TableSnapshot = {
   workbook: WorkbookData;
   marks: CellMarks;
   newRows: number[];
+  syntheticRows: number[];
+  categoricalDefaults: Record<number, string>;
   notice: string | null;
 };
 
 export const FIELD_LABELS: Record<RecordField, string> = {
-  topic: "Тема",
+  topic: "Текст наказа / тема",
   full_name: "ФИО",
   birth_date: "Дата рождения",
   address: "Адрес",

@@ -3,9 +3,9 @@ import type { ColumnMapping, MappableField } from "@/lib/types";
 const HEADER_ALIASES: Record<MappableField, RegExp[]> = {
   topic: [
     /^тема$/,
-    /^тематика$/,
-    /^тема (предложения|обращения)$/,
-    /^тематика (предложения|обращения)$/,
+    /^тема наказа$/,
+    /^текст наказа$/,
+    /^текст обращения$/,
   ],
   full_name: [
     /^фио(?: заявителя)?$/,
@@ -35,6 +35,21 @@ const HEADER_ALIASES: Record<MappableField, RegExp[]> = {
   ],
 };
 
+const DESCRIPTIVE_HEADER_ALIASES = [
+  /^муниципалитет$/,
+  /^адрес проживания$/,
+  /^фамилия$/,
+  /^имя$/,
+  /^отчество$/,
+  /^дата(?: рождения)?$/,
+  /^номер мобильного телефона$/,
+  /^e mail$/,
+  /^вовлеченность в деятельность партии(?: единая россия)?$/,
+  /^тематика (?:предложения|обращения)$/,
+  /^направление обращения$/,
+  /^текст наказа$/,
+];
+
 function normalizeHeader(value: unknown) {
   return String(value ?? "")
     .toLocaleLowerCase("ru-RU")
@@ -50,6 +65,27 @@ function fieldForHeader(value: unknown): MappableField | null {
     if (aliases.some((alias) => alias.test(normalized))) return field;
   }
   return null;
+}
+
+function descriptiveHeaderScore(row: unknown[]) {
+  return row.reduce<number>((score, value) => {
+    const normalized = normalizeHeader(value);
+    return score + (DESCRIPTIVE_HEADER_ALIASES.some((alias) => alias.test(normalized)) ? 1 : 0);
+  }, 0);
+}
+
+/** Finds a real business-header row below an optional technical row. */
+export function findDescriptiveHeaderRowIndex(matrix: unknown[][]) {
+  let bestIndex = 0;
+  let bestScore = descriptiveHeaderScore(matrix[0] ?? []);
+  matrix.slice(1, 10).forEach((row, offset) => {
+    const score = descriptiveHeaderScore(row);
+    if (score > bestScore) {
+      bestIndex = offset + 1;
+      bestScore = score;
+    }
+  });
+  return bestScore >= 3 ? bestIndex : 0;
 }
 
 function findEmbeddedHeaderRow(rows: unknown[][]) {
