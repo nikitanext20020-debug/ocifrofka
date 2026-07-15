@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { apiError, callStructured, readAgentConfig } from "@/lib/model-client";
 import { normalizedRecordsSchema } from "@/lib/schemas";
+import { normalizeBirthDate } from "@/lib/date-utils";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -35,7 +36,7 @@ export async function POST(request: Request) {
         {
           role: "system",
           content: [
-            "Приведи значения записей к указанным форматам таблицы. Не выдумывай отсутствующие данные и не меняй смысл. Верни JSON {records:[...]}, сохрани порядок и число записей. Поле topic — это исходный «Текст наказа» для колонки M: сохрани его смысл и не заменяй значением тематической категории. Поле full_name всегда возвращай полностью и в порядке «Фамилия Имя Отчество»: не оставляй только фамилию, даже если в целевой таблице фамилия, имя и отчество находятся в отдельных колонках — приложение разделит их самостоятельно. В каждой записи верни также объект categories.",
+            "Приведи значения записей к указанным форматам таблицы. Не выдумывай отсутствующие данные и не меняй смысл. Верни JSON {records:[...]}, сохрани порядок и число записей. Поле topic — это исходный «Текст наказа» для колонки M: сохрани его смысл и не заменяй значением тематической категории. Поле full_name всегда возвращай полностью и в порядке «Фамилия Имя Отчество»: не оставляй только фамилию, даже если в целевой таблице фамилия, имя и отчество находятся в отдельных колонках — приложение разделит их самостоятельно. Дату рождения всегда возвращай строго в формате ДД.ММ.ГГГГ, например 18.09.2001. В каждой записи верни также объект categories.",
             Object.keys(body.categoricals).length > 0
               ? `\nДля следующих полей допустимы ТОЛЬКО указанные значения. Если исходное поле заполнено, ОБЯЗАТЕЛЬНО выбери наиболее близкое по смыслу значение из списка и никогда не ставь «-». Прочерк допустим только когда исходное поле само пустое или равно «-»:\n${Object.entries(body.categoricals).map(([field, values]) => `- ${field}: [${values.map((v) => `«${v}»`).join(", ")}]`).join("\n")}`
               : "",
@@ -61,6 +62,7 @@ export async function POST(request: Request) {
     }
     result.records = result.records.map((record) => ({
       ...record,
+      birth_date: normalizeBirthDate(record.birth_date, body.formats.birth_date),
       categories: Object.fromEntries(
         Object.entries(record.categories).filter(([column, value]) => allowed.get(column)?.has(value)),
       ),
