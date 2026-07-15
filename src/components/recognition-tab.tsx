@@ -27,6 +27,7 @@ import { extractedRecordResponseSchema } from "@/lib/schemas";
 import { FIELD_LABELS, RECORD_FIELDS, type AppSettings, type ExtractedRecord, type RecordField } from "@/lib/types";
 import { downloadBlob, agentHeaders, readApiResponse, cn } from "@/lib/utils";
 import { recordsToCsv } from "@/lib/table-utils";
+import { correctBogorodskyAddress } from "@/lib/address-correction";
 import { Button, Card, EmptyState, Input, SectionTitle } from "@/components/ui";
 
 type PendingImageStatus = "idle" | "queued" | "processing" | "error";
@@ -137,11 +138,17 @@ export function RecognitionTab({
             }),
           );
           const parsed = extractedRecordResponseSchema.parse(payload);
+          const addressCorrection = correctBogorodskyAddress(parsed.address);
+          const correctionNote = addressCorrection.changed
+            ? `Адрес автоматически исправлен: «${addressCorrection.original}» → «${addressCorrection.value}».`
+            : "";
           return {
-          ...parsed,
-          id: crypto.randomUUID(),
-          sourceName: image.name,
-          thumbnail: await createThumbnail(image.dataUrl),
+            ...parsed,
+            address: addressCorrection.value,
+            confidence_notes: [parsed.confidence_notes, correctionNote].filter(Boolean).join(" "),
+            id: crypto.randomUUID(),
+            sourceName: image.name,
+            thumbnail: await createThumbnail(image.dataUrl),
           } satisfies ExtractedRecord;
         },
         onSettled: (result, image) => {
@@ -376,7 +383,7 @@ export function RecognitionTab({
                     </label>
                   ))}
                   {record.confidence_notes && (
-                    <p className="rounded-md bg-[#fff7df] px-3 py-2 text-sm text-[#725b20] sm:col-span-2">Неуверенно: {record.confidence_notes}</p>
+                    <p className="rounded-md bg-[#fff7df] px-3 py-2 text-sm text-[#725b20] sm:col-span-2">Примечание распознавания: {record.confidence_notes}</p>
                   )}
                 </div>
               </article>
