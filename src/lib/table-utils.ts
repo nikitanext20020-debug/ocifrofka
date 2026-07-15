@@ -76,6 +76,46 @@ export function applyCellChanges(
   return { rows: next, applied };
 }
 
+export function applyFixedColumnValues(
+  rows: unknown[][],
+  targetRows: readonly number[],
+  values: Record<number, string>,
+) {
+  const next = rows.map((row) => [...row]);
+  const applied: CellChange[] = [];
+  for (const rowIndex of [...new Set(targetRows)]) {
+    const row = next[rowIndex];
+    if (!row) continue;
+    for (const [rawColumn, value] of Object.entries(values)) {
+      const column = Number(rawColumn);
+      if (!value || column < 0 || column >= row.length || row[column] === value) continue;
+      row[column] = value;
+      applied.push({ row: rowIndex, column, value });
+    }
+  }
+  return { rows: next, applied };
+}
+
+export function markSyntheticRowsForExport(
+  table: TableData,
+  syntheticRows: readonly number[],
+): TableData {
+  if (!syntheticRows.length) return table;
+  const headers = [...table.headers];
+  let statusColumn = headers.findIndex((header) => header.trim().toLocaleLowerCase("ru-RU") === "статус данных");
+  if (statusColumn === -1) {
+    statusColumn = headers.length;
+    headers.push("Статус данных");
+  }
+  const marked = new Set(syntheticRows);
+  const rows = table.rows.map((source, rowIndex) => {
+    const row = Array.from({ length: headers.length }, (_, column) => source[column] ?? "");
+    if (marked.has(rowIndex)) row[statusColumn] = "Синтетические данные";
+    return row;
+  });
+  return { headers, rows };
+}
+
 export function appendRecords(
   table: TableData,
   records: Array<Record<RecordField, string>>,

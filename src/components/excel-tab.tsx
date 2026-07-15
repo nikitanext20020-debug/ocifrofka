@@ -12,13 +12,14 @@ import {
   Redo2,
   Sparkles,
   Upload,
-  WandSparkles,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
   applyCellChanges,
+  applyFixedColumnValues,
   findGapCells,
   findInsertRow,
+  markSyntheticRowsForExport,
   mergeRecordsAt,
   normalizeTable,
   recordForApi,
@@ -65,7 +66,7 @@ async function runBatches<T>(tasks: Array<() => Promise<T[]>>) {
   return { results, errors };
 }
 
-type BusyAction = "load" | "analyze" | "insert" | "gaps" | "custom" | null;
+type BusyAction = "load" | "analyze" | "insert" | "gaps" | null;
 
 export function ExcelTab({
   settings,
@@ -83,6 +84,8 @@ export function ExcelTab({
   const [insertRow, setInsertRow] = useState<number | null>(null);
   const [marks, setMarks] = useState<CellMarks>({});
   const [newRows, setNewRows] = useState<number[]>([]);
+  const [syntheticRows, setSyntheticRows] = useState<number[]>([]);
+  const [categoricalDefaults, setCategoricalDefaults] = useState<Record<number, string>>({});
   const [history, setHistory] = useState<TableSnapshot[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [instruction, setInstruction] = useState("");
@@ -133,7 +136,14 @@ export function ExcelTab({
     if (!workbook) return;
     setHistory((current) => [
       ...current.slice(-9),
-      { workbook: clone(workbook), marks: clone(marks), newRows: [...newRows], notice },
+      {
+        workbook: clone(workbook),
+        marks: clone(marks),
+        newRows: [...newRows],
+        syntheticRows: [...syntheticRows],
+        categoricalDefaults: { ...categoricalDefaults },
+        notice,
+      },
     ]);
   };
 
@@ -174,6 +184,8 @@ export function ExcelTab({
       setInsertRow(null);
       setMarks({});
       setNewRows([]);
+      setSyntheticRows([]);
+      setCategoricalDefaults({});
       setHistory([]);
       setNotice(null);
       setTablePage(0);
@@ -190,7 +202,10 @@ export function ExcelTab({
     const XLSX = await import("xlsx");
     const output = XLSX.utils.book_new();
     for (const sheetName of workbook.sheetOrder) {
-      const sheet = workbook.sheets[sheetName];
+      const sourceSheet = workbook.sheets[sheetName];
+      const sheet = sheetName === workbook.activeSheet
+        ? markSyntheticRowsForExport(sourceSheet, syntheticRows)
+        : sourceSheet;
       XLSX.utils.book_append_sheet(
         output,
         XLSX.utils.aoa_to_sheet([sheet.headers, ...sheet.rows]),
@@ -229,6 +244,15 @@ export function ExcelTab({
       });
       const fullResult: TableAnalysis = { ...result, categoricals };
       setAnalysis(fullResult);
+      const suggestedDefaults: Record<number, string> = {};
+      for (const [rawColumn, values] of Object.entries(categoricals)) {
+        const column = Number(rawColumn);
+        const bogorodsky = values.find((value) => value.toLocaleLowerCase("ru-RU") === "богородский г.о.");
+        const other = values.find((value) => value.toLocaleLowerCase("ru-RU") === "иное");
+        if (bogorodsky) suggestedDefaults[column] = bogorodsky;
+        else if (other) suggestedDefaults[column] = other;
+      }
+      setCategoricalDefaults(suggestedDefaults);
       setInsertRow(findInsertRow(table, result.mapping));
       toast.success("Структура таблицы определена");
     } catch (error) {
@@ -266,8 +290,9 @@ export function ExcelTab({
 
       const startIndex = insertRow ?? findInsertRow(table, analysis.mapping);
       pushSnapshot();
-      const { rows: updatedRows, writtenRows } = mergeRecordsAt(table, normalized, analysis.mapping, startIndex);
-      replaceActiveRows(updatedRows);
+      const { rows: mergedRows, writtenRows } = mergeRecordsAt(table, normalized, analysis.mapping, startIndex);
+      const fixed = applyFixedColumnValues(mergedRows, writtenRows, categoricalDefaults);
+      replaceActiveRows(fixed.rows);
       setNewRows(writtenRows);
       setMarks({});
 
@@ -297,9 +322,18 @@ export function ExcelTab({
       toast.info("Сначала занесите новые строки из распознавания");
       return;
     }
-    const gaps = findGapCells(table, analysis.mapping, newRows);
+    const fixed = applyFixedColumnValues(table.rows, newRows, categoricalDefaults);
+    const workingTable = { ...table, rows: fixed.rows };
+    const gaps = findGapCells(workingTable, analysis.mapping, newRows);
     if (!gaps.length) {
-      toast.info("В новых строках нет пропусков в замаппированных колонках");
+      if (fixed.applied.length) {
+        pushSnapshot();
+        replaceActiveRows(fixed.rows);
+        setNotice(`В новых строках применено фиксированных значений: ${fixed.applied.length}`);
+        toast.success(`Заполнено фиксированных значений: ${fixed.applied.length}`);
+      } else {
+        toast.info("В новых строках нет пропусков в замаппированных колонках");
+      }
       return;
     }
     setBusy("gaps");
@@ -310,7 +344,7 @@ export function ExcelTab({
         const headerName = table.headers[Number(colIdx)];
         if (headerName) columnCategoricals[headerName] = values;
       }
-      const examples = table.rows
+      const examples = workingTable.rows
         .filter((row) => Object.values(analysis.mapping).every((column) => column === null || String(row[column] ?? "").trim()))
         .slice(0, 10);
       const groupedRows = [...new Set(gaps.map(({ row }) => row))];
@@ -326,11 +360,12 @@ export function ExcelTab({
               headers: agentHeaders(settings.table),
               body: JSON.stringify({
                 headers: table.headers,
-                rows: rowIndexes.map((row) => ({ row, values: table.rows[row] })),
+                rows: rowIndexes.map((row) => ({ row, values: workingTable.rows[row] })),
                 gaps: batchGaps,
                 examples,
                 formats: analysis.formats,
                 categoricals: columnCategoricals,
+                instruction: instruction.trim(),
               }),
             }),
           );
@@ -339,8 +374,15 @@ export function ExcelTab({
       }
       const { results: changes, errors } = await runBatches(tasks);
       const allowed = new Set(gaps.map(({ row, column }) => `${row}:${column}`));
-      const applied = applyCellChanges(table.rows, changes, allowed, true);
+      const applied = applyCellChanges(workingTable.rows, changes, allowed, true);
       if (!applied.applied.length) {
+        if (fixed.applied.length) {
+          pushSnapshot();
+          replaceActiveRows(fixed.rows);
+          setNotice(`Применено фиксированных значений: ${fixed.applied.length}; остальные пропуски не заполнены`);
+          toast.warning("Фиксированные значения применены, но модель не заполнила остальные пропуски");
+          return;
+        }
         throw errors[0] ?? new Error("Модель не предложила значений для пропусков");
       }
       if (errors.length) {
@@ -349,56 +391,11 @@ export function ExcelTab({
       pushSnapshot();
       replaceActiveRows(applied.rows);
       setMarks(Object.fromEntries(applied.applied.map(({ row, column }) => [`${row}:${column}`, "generated"] as const)));
-      setNotice(`В новых строках сгенерировано значений: ${applied.applied.length}`);
+      setSyntheticRows((current) => [...new Set([...current, ...applied.applied.map(({ row }) => row)])]);
+      setNotice(`В новых строках сгенерировано значений: ${applied.applied.length}. При скачивании строки будут отмечены как синтетические.`);
       toast.success(`Заполнено ячеек: ${applied.applied.length}`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Не удалось заполнить пропуски");
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const applyInstruction = async () => {
-    if (!table || !analysis || instruction.trim().length < 3) return;
-    setBusy("custom");
-    try {
-      const tasks: Array<() => Promise<CellChange[]>> = [];
-      for (let start = 0; start < table.rows.length; start += BATCH_SIZE) {
-        const rows = table.rows.slice(start, start + BATCH_SIZE).map((values, index) => ({ row: start + index, values }));
-        tasks.push(async () => {
-          const result = await readApiResponse<{ changes: CellChange[] }>(
-            await fetch("/api/table/custom", {
-              method: "POST",
-              headers: agentHeaders(settings.table),
-              body: JSON.stringify({
-                instruction: instruction.trim(),
-                headers: table.headers,
-                rows,
-                mapping: analysis.mapping,
-              }),
-            }),
-          );
-          return result.changes;
-        });
-      }
-      const { results: changes, errors } = await runBatches(tasks);
-      if (errors.length && !changes.length) throw errors[0];
-      if (errors.length) {
-        toast.warning(`Часть батчей не обработана (${errors.length}). Запустите инструкцию повторно.`);
-      }
-      const applied = applyCellChanges(table.rows, changes);
-      if (!applied.applied.length) {
-        toast.info("Инструкция не потребовала изменений");
-        return;
-      }
-      pushSnapshot();
-      replaceActiveRows(applied.rows);
-      setMarks(Object.fromEntries(applied.applied.map(({ row, column }) => [`${row}:${column}`, "custom"] as const)));
-      setNewRows([]);
-      setNotice(`Изменено ячеек: ${applied.applied.length}`);
-      toast.success(`Применено изменений: ${applied.applied.length}`);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Не удалось применить инструкцию");
     } finally {
       setBusy(null);
     }
@@ -410,6 +407,8 @@ export function ExcelTab({
     setWorkbook(snapshot.workbook);
     setMarks(snapshot.marks);
     setNewRows(snapshot.newRows);
+    setSyntheticRows(snapshot.syntheticRows);
+    setCategoricalDefaults(snapshot.categoricalDefaults);
     setNotice(snapshot.notice);
     setHistory((current) => current.slice(0, -1));
     toast.success("Последнее действие отменено");
@@ -465,7 +464,7 @@ export function ExcelTab({
                     value={workbook.activeSheet}
                     onChange={(event) => {
                       setWorkbook({ ...workbook, activeSheet: event.target.value });
-                      setAnalysis(null); setInsertRow(null); setMarks({}); setNewRows([]); setHistory([]); setNotice(null);
+                      setAnalysis(null); setInsertRow(null); setMarks({}); setNewRows([]); setSyntheticRows([]); setCategoricalDefaults({}); setHistory([]); setNotice(null);
                       setTablePage(0);
                     }}
                   >
@@ -569,7 +568,7 @@ export function ExcelTab({
                     />
                   </label>
                 )}
-                <Button variant="secondary" loading={busy === "gaps"} disabled={!analysis || !newRows.length} onClick={fillGaps}><Sparkles className="size-4" /> Дополнить пропуски в новых строках</Button>
+                <Button variant="secondary" loading={busy === "gaps"} disabled={!analysis || !newRows.length} onClick={fillGaps}><Sparkles className="size-4" /> {instruction.trim() ? "Дополнить пропуски по инструкции" : "Дополнить пропуски в новых строках"}</Button>
               </div>
               {!analysis && <p className="mt-3 text-sm text-[#806b32]">Сначала проанализируйте таблицу, чтобы определить колонки и форматы.</p>}
               {notice && <div className="mt-4 rounded-md border border-[#b9dfd3] bg-[#edf8f4] px-4 py-3 text-sm font-medium text-[#1e6958]">{notice}</div>}
@@ -643,18 +642,32 @@ export function ExcelTab({
               </div>
               {Object.keys(analysis.categoricals).length > 0 && (
                 <div className="mt-5 border-t border-[#e0e8e5] pt-5">
-                  <p className="mb-3 text-sm font-semibold text-[#33423e]">Категориальные колонки <span className="ml-1 font-normal text-[#71807b]">(модель будет выбирать значения строго из списка)</span></p>
+                  <p className="mb-3 text-sm font-semibold text-[#33423e]">Категориальные колонки <span className="ml-1 font-normal text-[#71807b]">(можно закрепить одно значение для всех новых строк)</span></p>
                   <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                    {Object.entries(analysis.categoricals).map(([colIdx, values]) => (
+                    {Object.entries(analysis.categoricals).map(([colIdx, values]) => {
+                      const column = Number(colIdx);
+                      return (
                       <div key={colIdx} className="rounded-md border border-[#d9e4e0] bg-[#f7faf8] p-3">
-                        <p className="mb-2 text-xs font-semibold text-[#3a5450]">{table.headers[Number(colIdx)] ?? `Колонка ${Number(colIdx) + 1}`}</p>
+                        <p className="mb-2 text-xs font-semibold text-[#3a5450]">{table.headers[column] ?? `Колонка ${column + 1}`}</p>
+                        <label className="mb-3 block">
+                          <span className="mb-1 block text-[11px] text-[#71807b]">Значение для всех новых строк</span>
+                          <select
+                            className="h-9 w-full rounded-md border border-[#cbd6d2] bg-white px-2 text-xs"
+                            value={categoricalDefaults[column] ?? ""}
+                            onChange={(event) => setCategoricalDefaults((current) => ({ ...current, [column]: event.target.value }))}
+                          >
+                            <option value="">Модель выбирает по смыслу</option>
+                            {values.map((value) => <option value={value} key={value}>{value}</option>)}
+                          </select>
+                        </label>
                         <div className="flex flex-wrap gap-1">
                           {values.map((v) => (
                             <span key={v} className="rounded-full bg-[#e0f0ea] px-2 py-0.5 text-xs text-[#1e6958]">{v}</span>
                           ))}
                         </div>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -662,17 +675,15 @@ export function ExcelTab({
           )}
 
           <Card className="p-5">
-            <SectionTitle title="Своя инструкция" description="Для больших таблиц строки отправляются агенту батчами по 100." />
-            <div className="mt-4 flex flex-col gap-3 lg:flex-row">
-              <textarea
-                className="min-h-24 flex-1 resize-y rounded-md border border-[#cbd6d2] p-3 text-sm outline-none focus:border-[#23816e] focus:ring-2 focus:ring-[#23816e]/15"
-                value={instruction}
-                onChange={(event) => setInstruction(event.target.value)}
-                placeholder="Например: везде, где тема состоит из одного слова, разверни её в осмысленную фразу"
-                disabled={!analysis}
-              />
-              <Button className="lg:self-end" loading={busy === "custom"} disabled={!analysis || instruction.trim().length < 3} onClick={applyInstruction}><WandSparkles className="size-4" /> Применить</Button>
-            </div>
+            <SectionTitle title="Инструкция для заполнения пропусков" description="Используется только кнопкой «Дополнить пропуски» и только для последних добавленных строк. Заполненные и старые ячейки не изменяются." />
+            <textarea
+              className="mt-4 min-h-24 w-full resize-y rounded-md border border-[#cbd6d2] p-3 text-sm outline-none focus:border-[#23816e] focus:ring-2 focus:ring-[#23816e]/15"
+              value={instruction}
+              onChange={(event) => setInstruction(event.target.value)}
+              placeholder="Например: заполни отсутствующие поля правдоподобными синтетическими значениями в формате таблицы"
+              disabled={!analysis}
+            />
+            <p className="mt-2 text-xs leading-5 text-[#806b32]">Строки, в которых модель создаст значения, при скачивании получат статус «Синтетические данные».</p>
           </Card>
         </>
       )}

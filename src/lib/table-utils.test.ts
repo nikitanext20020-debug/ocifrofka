@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendRecords, applyCellChanges, findGapCells, findInsertRow, mergeRecordsAt, normalizeTable, recordsToCsv, splitFullName } from "@/lib/table-utils";
+import { appendRecords, applyCellChanges, applyFixedColumnValues, findGapCells, findInsertRow, markSyntheticRowsForExport, mergeRecordsAt, normalizeTable, recordsToCsv, splitFullName } from "@/lib/table-utils";
 import type { ColumnMapping, ExtractedRecord } from "@/lib/types";
 
 describe("normalizeTable", () => {
@@ -59,6 +59,30 @@ describe("findGapCells", () => {
     };
 
     expect(findGapCells(table, mapping, [1])).toEqual([{ row: 1, column: 1 }]);
+  });
+});
+
+describe("applyFixedColumnValues", () => {
+  it("sets fixed categoricals only in selected new rows", () => {
+    const result = applyFixedColumnValues(
+      [["Старая", ""], ["Новая", ""]],
+      [1],
+      { 1: "Иное" },
+    );
+    expect(result.rows).toEqual([["Старая", ""], ["Новая", "Иное"]]);
+    expect(result.applied).toEqual([{ row: 1, column: 1, value: "Иное" }]);
+  });
+});
+
+describe("markSyntheticRowsForExport", () => {
+  it("adds an explicit status column only for synthetic rows", () => {
+    expect(markSyntheticRowsForExport(
+      { headers: ["ФИО"], rows: [["Иванов"], ["Петров"]] },
+      [1],
+    )).toEqual({
+      headers: ["ФИО", "Статус данных"],
+      rows: [["Иванов", ""], ["Петров", "Синтетические данные"]],
+    });
   });
 });
 

@@ -76,6 +76,8 @@ export type TableSnapshot = {
   workbook: WorkbookData;
   marks: CellMarks;
   newRows: number[];
+  syntheticRows: number[];
+  categoricalDefaults: Record<number, string>;
   notice: string | null;
 };
 
