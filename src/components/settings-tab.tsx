@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { CheckCircle2, CirclePlus, Eye, EyeOff, RotateCcw, ServerCog, Trash2 } from "lucide-react";
+import { CheckCircle2, CirclePlus, Eye, EyeOff, RotateCcw, Save, ServerCog, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { DEFAULT_EXTRACTION_PROMPT } from "@/lib/constants";
 import { createEmptyVisionAgent } from "@/lib/vision-agents";
@@ -132,21 +132,42 @@ function AgentSection({
 }
 
 export function SettingsTab({ settings, onChange }: { settings: AppSettings; onChange: (settings: AppSettings) => void }) {
+  const [draft, setDraft] = useState<AppSettings>(settings);
+  const [prevSettings, setPrevSettings] = useState<AppSettings>(settings);
+
+  // Sync draft when the persisted settings change externally (e.g. after save/normalize).
+  if (prevSettings !== settings) {
+    setPrevSettings(settings);
+    setDraft(settings);
+  }
+
+  const dirty = JSON.stringify(draft) !== JSON.stringify(settings);
+
+  const save = () => {
+    onChange(draft);
+    toast.success("Настройки сохранены");
+  };
+
+  const discard = () => {
+    setDraft(settings);
+    toast.info("Изменения отменены");
+  };
+
   const updateVisionAgent = (agent: VisionAgent) => {
-    onChange({ ...settings, visionAgents: settings.visionAgents.map((current) => current.id === agent.id ? agent : current) });
+    setDraft((current) => ({ ...current, visionAgents: current.visionAgents.map((item) => item.id === agent.id ? agent : item) }));
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 pb-24">
       <section className="space-y-3">
         <div className="flex items-start justify-between gap-4">
           <SectionTitle title="Агенты распознавания" description="Выберите один API-агент для распознавания документов." />
           <button type="button" title="Добавить агента" aria-label="Добавить агента" className="grid size-9 shrink-0 place-items-center rounded-md border border-[#cbd6d2] text-[#31685b] hover:bg-[#edf7f4]" onClick={() => {
-            const agent = createEmptyVisionAgent(settings.visionAgents.length + 1);
-            onChange({ ...settings, visionAgents: [...settings.visionAgents, agent], activeVisionAgentId: agent.id });
+            const agent = createEmptyVisionAgent(draft.visionAgents.length + 1);
+            setDraft((current) => ({ ...current, visionAgents: [...current.visionAgents, agent], activeVisionAgentId: agent.id }));
           }}><CirclePlus className="size-4" /></button>
         </div>
-        {settings.visionAgents.map((agent) => (
+        {draft.visionAgents.map((agent) => (
           <AgentSection
             key={agent.id}
             title={agent.name || "Без названия"}
@@ -156,21 +177,35 @@ export function SettingsTab({ settings, onChange }: { settings: AppSettings; onC
             value={agent}
             onChange={(value) => updateVisionAgent({ ...agent, ...value })}
             models={["cx/gpt-5.5-review"]}
-            active={agent.id === settings.activeVisionAgentId}
-            onActivate={() => onChange({ ...settings, activeVisionAgentId: agent.id })}
-            onRemove={settings.visionAgents.length > 1 ? () => {
-              const visionAgents = settings.visionAgents.filter((current) => current.id !== agent.id);
-              onChange({ ...settings, visionAgents, activeVisionAgentId: agent.id === settings.activeVisionAgentId ? visionAgents[0].id : settings.activeVisionAgentId });
+            active={agent.id === draft.activeVisionAgentId}
+            onActivate={() => setDraft((current) => ({ ...current, activeVisionAgentId: agent.id }))}
+            onRemove={draft.visionAgents.length > 1 ? () => {
+              setDraft((current) => {
+                const visionAgents = current.visionAgents.filter((item) => item.id !== agent.id);
+                return { ...current, visionAgents, activeVisionAgentId: agent.id === current.activeVisionAgentId ? visionAgents[0].id : current.activeVisionAgentId };
+              });
             } : undefined}
           />
         ))}
       </section>
-      <AgentSection title="Excel-агент" description="Анализирует структуру таблицы и возвращает только точечные изменения." value={settings.table} onChange={(table) => onChange({ ...settings, table })} models={["deepseek/deepseek-v4-flash", "x-ai/grok-4.5"]} />
+      <AgentSection title="Excel-агент" description="Анализирует структуру таблицы и возвращает только точечные изменения." value={draft.table} onChange={(table) => setDraft((current) => ({ ...current, table }))} models={["deepseek/deepseek-v4-flash", "x-ai/grok-4.5"]} />
       <Card className="p-5">
-        <SectionTitle title="Промт распознавания" description="Используется как system prompt для каждого изображения." action={<Button variant="secondary" onClick={() => onChange({ ...settings, extractionPrompt: DEFAULT_EXTRACTION_PROMPT })}><RotateCcw className="size-4" /> Сбросить к стандартному</Button>} />
-        <textarea className="mt-5 min-h-64 w-full resize-y rounded-md border border-[#cbd6d2] bg-white p-3 text-sm leading-6 outline-none focus:border-[#23816e] focus:ring-2 focus:ring-[#23816e]/15" value={settings.extractionPrompt} onChange={(event) => onChange({ ...settings, extractionPrompt: event.target.value })} />
+        <SectionTitle title="Промт распознавания" description="Используется как system prompt для каждого изображения." action={<Button variant="secondary" onClick={() => setDraft((current) => ({ ...current, extractionPrompt: DEFAULT_EXTRACTION_PROMPT }))}><RotateCcw className="size-4" /> Сбросить к стандартному</Button>} />
+        <textarea className="mt-5 min-h-64 w-full resize-y rounded-md border border-[#cbd6d2] bg-white p-3 text-sm leading-6 outline-none focus:border-[#23816e] focus:ring-2 focus:ring-[#23816e]/15" value={draft.extractionPrompt} onChange={(event) => setDraft((current) => ({ ...current, extractionPrompt: event.target.value }))} />
         <p className="mt-2 text-xs text-[#7b8985]">Настройки и ключи сохраняются только в localStorage этого браузера.</p>
       </Card>
+
+      <div className="fixed inset-x-0 bottom-0 z-20 border-t border-[#dce5e1] bg-white/95 backdrop-blur">
+        <div className="mx-auto flex max-w-[1540px] items-center justify-between gap-4 px-4 py-3 sm:px-6 lg:px-8">
+          <span className="text-sm text-[#71807b]">
+            {dirty ? "Есть несохранённые изменения" : "Все изменения сохранены"}
+          </span>
+          <div className="flex items-center gap-2">
+            <Button variant="secondary" onClick={discard} disabled={!dirty}>Отменить</Button>
+            <Button onClick={save} disabled={!dirty}><Save className="size-4" /> Сохранить</Button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
