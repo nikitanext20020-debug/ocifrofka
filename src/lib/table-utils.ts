@@ -1,4 +1,12 @@
-import type { CellChange, ColumnMapping, ExtractedRecord, MappableField, NamePartField, RecordField, TableData } from "@/lib/types";
+import type {
+  CellChange,
+  ColumnMapping,
+  ExtractedRecord,
+  MappableField,
+  NamePartField,
+  RecordField,
+  TableData,
+} from "@/lib/types";
 import { NAME_PART_FIELDS, RECORD_FIELDS } from "@/lib/types";
 import { findDescriptiveHeaderRowIndex } from "@/lib/column-mapping";
 
@@ -22,12 +30,158 @@ export function isBriefRecognizedText(value: unknown) {
 
 export function splitFullName(value: string): Record<NamePartField, string> {
   const normalized = value.trim().replace(/\s+/g, " ");
+  if (!normalized || normalized === "-") {
+    return {
+      last_name: normalized,
+      first_name: normalized,
+      middle_name: normalized,
+    };
+  }
+
   const [lastName = "", firstName = "", ...middleName] = normalized.split(" ");
-  return { last_name: lastName, first_name: firstName, middle_name: middleName.join(" ") };
+  return {
+    last_name: lastName,
+    first_name: firstName,
+    middle_name: middleName.join(" "),
+  };
 }
 
 function valuesForMapping(record: Record<RecordField, string>) {
-  return { ...record, ...splitFullName(record.full_name) } satisfies Record<MappableField, string>;
+  return {
+    ...record,
+    ...splitFullName(record.full_name),
+  } satisfies Record<MappableField, string>;
+}
+
+export function normalizeTable(matrix: unknown[][]): TableData {
+  if (matrix.length === 0) return { headers: [], rows: [] };
+  const headerRowIndex = findDescriptiveHeaderRowIndex(matrix);
+  const rawHeaders = matrix[headerRowIndex] ?? [];
+  const lastNamedColumn = rawHeaders.reduce<number>(
+    (last, value, index) => String(value ?? "").trim() ? index : last,
+    -1,
+  );
+  const width = lastNamedColumn >= 0
+    ? lastNamedColumn + 1
+    : Math.max(...matrix.map((row) => row.length), 0);
+  const headers = Array.from({ length: width }, (_, index) => {
+    const value = String(rawHeaders[index] ?? "").trim();
+    return value || `Колонка ${index + 1}`;
+  });
+  const rows = matrix.slice(headerRowIndex + 1).map((row) =>
+    Array.from({ length: width }, (_, index) => row[index] ?? ""),
+  );
+  return { headers, rows };
+}
+
+export function applyRecordCategories(
+  rows: unknown[][],
+  targetRows: readonly number[],
+  records: ReadonlyArray<{ categories?: Record<string, string> }>,
+) {
+  const next = rows.map((row) => [...row]);
+  const applied: CellChange[] = [];
+  targetRows.forEach((rowIndex, recordIndex) => {
+    const row = next[rowIndex];
+    if (!row) return;
+    for (const [rawColumn, value] of Object.entries(records[recordIndex]?.categories ?? {})) {
+      const column = Number(rawColumn);
+      if (!Number.isInteger(column) || column < 0 || column >= row.length || !isEmptyCell(row[column])) continue;
+      row[column] = value;
+      applied.push({ row: rowIndex, column, value });
+    }
+  });
+  return { rows: next, applied };
+}
+
+export function applyCellChanges(
+  rows: unknown[][],
+  changes: CellChange[],
+  allowed?: Set<string>,
+  emptyOnly = false,
+) {
+  const next = rows.map((row) => [...row]);
+  const applied: CellChange[] = [];
+  for (const change of changes) {
+    const key = `${change.row}:${change.column}`;
+    const explicitlyAllowed = allowed?.has(key) ?? false;
+    if (
+      change.row < 0 ||
+      change.row >= next.length ||
+      change.column < 0 ||
+      change.column >= (next[change.row]?.length ?? 0) ||
+      (allowed && !explicitlyAllowed) ||
+      (emptyOnly && !isEmptyCell(next[change.row][change.column]) && !explicitlyAllowed)
+    ) {
+      continue;
+    }
+    next[change.row][change.column] = change.value;
+    applied.push(change);
+  }
+  return { rows: next, applied };
+}
+
+export function applyFixedColumnValues(
+  rows: unknown[][],
+  targetRows: readonly number[],
+  values: Record<number, string>,
+) {
+  const next = rows.map((row) => [...row]);
+  const applied: CellChange[] = [];
+  for (const rowIndex of [...new Set(targetRows)]) {
+    const row = next[rowIndex];
+    if (!row) continue;
+    for (const [rawColumn, value] of Object.entries(values)) {
+      const column = Number(rawColumn);
+      if (!value || column < 0 || column >= row.length || row[column] === value) continue;
+      row[column] = value;
+      applied.push({ row: rowIndex, column, value });
+    }
+  }
+  return { rows: next, applied };
+}
+
+export function markSyntheticRowsForExport(
+  table: TableData,
+  syntheticRows: readonly number[],
+): TableData {
+  if (!syntheticRows.length) return table;
+  const headers = [...table.headers];
+  let statusColumn = headers.findIndex((header) => header.trim().toLocaleLowerCase("ru-RU") === "статус данных");
+  if (statusColumn === -1) {
+    statusColumn = headers.length;
+    headers.push("Статус данных");
+  }
+  const marked = new Set(syntheticRows);
+  const rows = table.rows.map((source, rowIndex) => {
+    const row = Array.from({ length: headers.length }, (_, column) => source[column] ?? "");
+    if (marked.has(rowIndex)) row[statusColumn] = "Синтетические данные";
+    return row;
+  });
+  return { headers, rows };
+}
+
+export function appendRecords(
+  table: TableData,
+  records: Array<Record<RecordField, string>>,
+  mapping: ColumnMapping,
+) {
+  const added = records.map((record) => {
+    const row = Array.from({ length: table.headers.length }, () => "");
+    const values = valuesForMapping(record);
+    for (const field of MAPPABLE_FIELDS) {
+      const column = mapping[field];
+      if (
+        column !== null &&
+        column < row.length &&
+        !String(row[column] ?? "").trim()
+      ) {
+        row[column] = values[field];
+      }
+    }
+    return row;
+  });
+  return { ...table, rows: [...table.rows, ...added] };
 }
 
 export function isEmptyCell(value: unknown) {
@@ -35,43 +189,129 @@ export function isEmptyCell(value: unknown) {
   return !normalized || normalized === "-";
 }
 
-export function normalizeTable(matrix: unknown[][]): TableData {
-  if (!matrix.length) return { headers: [], rows: [] };
-  const headerRowIndex = findDescriptiveHeaderRowIndex(matrix);
-  const rawHeaders = matrix[headerRowIndex] ?? [];
-  const width = rawHeaders.reduce((last, value, index) => String(value ?? "").trim() ? index + 1 : last, 0);
-  return {
-    headers: Array.from({ length: width }, (_, index) => String(rawHeaders[index] ?? "").trim() || `Колонка ${index + 1}`),
-    rows: matrix.slice(headerRowIndex + 1).map((row) => Array.from({ length: width }, (_, index) => row[index] ?? "")),
-  };
-}
-
-export function applyCellChanges(rows: unknown[][], changes: CellChange[]) {
-  const next = rows.map((row) => [...row]);
-  for (const change of changes) {
-    if (next[change.row] && change.column < next[change.row].length) next[change.row][change.column] = change.value;
-  }
-  return { rows: next, applied: changes };
-}
-
-export function findGapCells(table: TableData, mapping: ColumnMapping, targetRows: readonly number[]) {
+export function findGapCells(
+  table: TableData,
+  mapping: ColumnMapping,
+  targetRows: readonly number[],
+) {
+  const mappedColumns = [...new Set(Object.values(mapping).filter(
+    (column): column is number => column !== null,
+  ))];
+  const derivedCategoryColumns = table.headers
+    .map((header, column) => ({ header, column }))
+    .filter(({ header }) => isDerivedCategoryHeader(header))
+    .map(({ column }) => column);
   const gaps: Array<{ row: number; column: number }> = [];
-  const categoryColumns = table.headers.map((header, column) => ({ header, column })).filter(({ header }) => isDerivedCategoryHeader(header)).map(({ column }) => column);
-  for (const row of targetRows) {
-    const data = table.rows[row];
-    if (!data) continue;
-    Object.values(mapping).forEach((column) => {
-      if (column !== null && isEmptyCell(data[column])) gaps.push({ row, column });
+  const seen = new Set<string>();
+  const addTarget = (row: number, column: number) => {
+    const key = `${row}:${column}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    gaps.push({ row, column });
+  };
+
+  for (const rowIndex of [...new Set(targetRows)]) {
+    const row = table.rows[rowIndex];
+    if (!row) continue;
+    mappedColumns.forEach((column) => {
+      if (column < table.headers.length && isEmptyCell(row[column])) {
+        addTarget(rowIndex, column);
+      }
     });
-    if (mapping.topic !== null && (isEmptyCell(data[mapping.topic]) || isBriefRecognizedText(data[mapping.topic]))) {
-      categoryColumns.forEach((column) => gaps.push({ row, column }));
+
+    const topicColumn = mapping.topic;
+    if (topicColumn === null || topicColumn >= table.headers.length) continue;
+    const topicIsMissing = isEmptyCell(row[topicColumn]);
+    const topicIsBrief = isBriefRecognizedText(row[topicColumn]);
+    if (topicIsBrief) addTarget(rowIndex, topicColumn);
+
+    if (topicIsMissing || topicIsBrief) {
+      derivedCategoryColumns.forEach((column) => addTarget(rowIndex, column));
     }
   }
   return gaps;
 }
 
-export function markSyntheticRowsForExport(table: TableData) { return table; }
-export function recordForApi(record: ExtractedRecord) { return record as Record<RecordField, string>; }
-export function appendRecords(table: TableData, records: Array<Record<RecordField, string>>, mapping: ColumnMapping) { return table; }
-export function applyFixedColumnValues(rows: unknown[][]) { return { rows, applied: [] }; }
-export function applyRecordCategories(rows: unknown[][]) { return { rows, applied: [] }; }
+export function recordForApi(record: ExtractedRecord) {
+  return Object.fromEntries(
+    RECORD_FIELDS.map((field) => [field, record[field]]),
+  ) as Record<RecordField, string>;
+}
+
+export function findInsertRow(table: TableData, mapping: ColumnMapping): number {
+  const mappedColumns = [...new Set(Object.values(mapping).filter(
+    (col): col is number => col !== null,
+  ))];
+  if (!mappedColumns.length || !table.rows.length) return 0;
+
+  const monotoneColumns = new Set<number>();
+  for (const col of mappedColumns) {
+    const nonEmpty = table.rows
+      .map((row) => String(row[col] ?? "").trim())
+      .filter((v) => v !== "" && v !== "-");
+    if (nonEmpty.length < 2) continue;
+    const freq = new Map<string, number>();
+    for (const v of nonEmpty) freq.set(v, (freq.get(v) ?? 0) + 1);
+    const maxCount = Math.max(...freq.values());
+    if (maxCount / nonEmpty.length >= 0.95) monotoneColumns.add(col);
+  }
+
+  const activeCols = mappedColumns.filter((col) => !monotoneColumns.has(col));
+  if (!activeCols.length) return 0;
+
+  for (let i = table.rows.length - 1; i >= 0; i--) {
+    const row = table.rows[i];
+    const hasData = activeCols.some((col) => {
+      const v = String(row[col] ?? "").trim();
+      return v !== "" && v !== "-";
+    });
+    if (hasData) return i + 1;
+  }
+  return 0;
+}
+
+export function mergeRecordsAt(
+  table: TableData,
+  records: Array<Record<RecordField, string>>,
+  mapping: ColumnMapping,
+  insertRowIndex: number,
+): { rows: unknown[][]; writtenRows: number[] } {
+  const next = table.rows.map((row) => [...row]);
+  const writtenRows: number[] = [];
+
+  for (let i = 0; i < records.length; i++) {
+    const rowIndex = insertRowIndex + i;
+    if (rowIndex >= next.length) break;
+    const record = records[i];
+    const values = valuesForMapping(record);
+    for (const field of MAPPABLE_FIELDS) {
+      const col = mapping[field];
+      if (col === null || col >= (next[rowIndex]?.length ?? 0)) continue;
+      const existing = String(next[rowIndex][col] ?? "").trim();
+      if (!existing || existing === "-") {
+        next[rowIndex][col] = values[field];
+      }
+    }
+    writtenRows.push(rowIndex);
+  }
+
+  return { rows: next, writtenRows };
+}
+
+export function recordsToCsv(records: ExtractedRecord[]) {
+  const headers = ["Тема", "ФИО", "Дата рождения", "Адрес", "Телефон", "Примечание"];
+  const escape = (value: string) => `"${value.replaceAll('"', '""')}"`;
+  const rows = records.map((record) =>
+    [
+      record.topic,
+      record.full_name,
+      record.birth_date,
+      record.address,
+      record.phone,
+      record.confidence_notes,
+    ]
+      .map(escape)
+      .join(","),
+  );
+  return `\uFEFF${headers.map(escape).join(",")}\n${rows.join("\n")}`;
+}
