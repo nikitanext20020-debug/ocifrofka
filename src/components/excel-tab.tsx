@@ -92,6 +92,10 @@ function isNamePartField(field: MappableField): field is NamePartField {
   return (NAME_PART_FIELDS as readonly string[]).includes(field);
 }
 
+function isStructuredModelFormatError(error: unknown) {
+  return error instanceof Error && error.message.startsWith("Модель дважды вернула неверный формат");
+}
+
 async function runBatches<T>(tasks: Array<() => Promise<T[]>>) {
   const results: T[] = [];
   const errors: Error[] = [];
@@ -329,16 +333,26 @@ export function ExcelTab({
         .filter(({ header }) => isDerivedCategoryHeader(header));
 
       const normalized: Array<Record<(typeof RECORD_FIELDS)[number], string> & { categories: Record<string, string> }> = [];
+      let usedRawFallback = false;
       for (let start = 0; start < queue.length; start += BATCH_SIZE) {
         const batch = queue.slice(start, start + BATCH_SIZE).map(recordForApi);
-        const result = await readApiResponse<{ records: typeof normalized }>(
-          await fetch("/api/table/insert", {
-            method: "POST",
-            headers: agentHeaders(settings.table),
-            body: JSON.stringify({ records: batch, formats: analysis.formats, categoricals: fieldCategoricals, categoryColumns }),
-          }),
-        );
-        normalized.push(...result.records);
+        try {
+          const result = await readApiResponse<{ records: typeof normalized }>(
+            await fetch("/api/table/insert", {
+              method: "POST",
+              headers: agentHeaders(settings.table),
+              body: JSON.stringify({ records: batch, formats: analysis.formats, categoricals: fieldCategoricals, categoryColumns }),
+            }),
+          );
+          normalized.push(...result.records);
+        } catch (error) {
+          if (!isStructuredModelFormatError(error)) throw error;
+          usedRawFallback = true;
+          normalized.push(...batch.map((record) => ({ ...record, categories: {} })));
+        }
+      }
+      if (usedRawFallback) {
+        toast.warning("Модель вернула неверный формат, поэтому часть данных вставлена в исходном виде без дополнительного форматирования.");
       }
 
       const startIndex = insertRow ?? findInsertRow(table, analysis.mapping);
