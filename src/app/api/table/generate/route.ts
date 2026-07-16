@@ -237,32 +237,49 @@ export async function POST(request: Request) {
     });
 
     const first = await generate();
+    let firstValidated: ReturnType<typeof validateAndNormalizeRows> | null = null;
     try {
-      const firstValidated = validateAndNormalizeRows(first.rows, body);
-      return Response.json({
-        rows: firstValidated.rows,
-        ...(firstValidated.qualityIssues.length
-          ? { warning: `Строки созданы, но проверьте результат: ${firstValidated.qualityIssues.join("; ")}.` }
-          : {}),
-      });
+      firstValidated = validateAndNormalizeRows(first.rows, body);
     } catch (error) {
       if (!(error instanceof GeneratedRowsError)) throw error;
+    }
+
+    // Retry when: (a) first attempt had a format error, or (b) first attempt has quality issues.
+    // In case (b) we still have a usable result, so if retry is worse we fall back to it.
+    if (!firstValidated || firstValidated.qualityIssues.length) {
       const second = await generate(true);
       try {
         const secondValidated = validateAndNormalizeRows(second.rows, body);
+        // Prefer the result with fewer quality problems.
+        const best =
+          firstValidated &&
+          firstValidated.qualityIssues.length <= secondValidated.qualityIssues.length
+            ? firstValidated
+            : secondValidated;
         return Response.json({
-          ...secondValidated,
-          ...(secondValidated.qualityIssues.length
-            ? { warning: `Строки созданы, но проверьте тексты: ${secondValidated.qualityIssues.join("; ")}.` }
+          rows: best.rows,
+          ...(best.qualityIssues.length
+            ? { warning: `Строки созданы, но проверьте результат: ${best.qualityIssues.join("; ")}.` }
             : {}),
         });
       } catch (retryError) {
-        if (retryError instanceof GeneratedRowsError) {
-          return Response.json({ error: retryError.message }, { status: 502 });
+        if (!(retryError instanceof GeneratedRowsError)) throw retryError;
+        // Retry also had a format error.
+        if (firstValidated) {
+          // First attempt was valid — return it with its original warning.
+          return Response.json({
+            rows: firstValidated.rows,
+            ...(firstValidated.qualityIssues.length
+              ? { warning: `Строки созданы, но проверьте результат: ${firstValidated.qualityIssues.join("; ")}.` }
+              : {}),
+          });
         }
-        throw retryError;
+        return Response.json({ error: retryError.message }, { status: 502 });
       }
     }
+
+    // First attempt was valid and had no quality issues.
+    return Response.json({ rows: firstValidated.rows });
   } catch (error) {
     if (error instanceof z.ZodError) {
       return Response.json({ error: "Проверьте количество строк и инструкцию генератора." }, { status: 400 });
