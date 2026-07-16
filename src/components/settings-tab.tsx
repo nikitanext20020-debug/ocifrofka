@@ -11,6 +11,7 @@ import {
 import { createEmptyVisionAgent, normalizeParallelRequests } from "@/lib/vision-agents";
 import type { AgentConfig, AppSettings, VisionAgent } from "@/lib/types";
 import { agentHeaders, readApiResponse } from "@/lib/utils";
+import { loggedFetch, logAppError } from "@/lib/app-logs";
 import { Button, Card, Input, SectionTitle } from "@/components/ui";
 
 const BASE_PRESETS = [
@@ -58,15 +59,20 @@ function AgentSection({
     setSuccess(false);
     try {
       await readApiResponse(
-        await fetch("/api/connection/test", {
-          method: "POST",
-          headers: agentHeaders(value),
-          body: "{}",
-        }),
+        await loggedFetch(
+          "/api/connection/test",
+          {
+            method: "POST",
+            headers: agentHeaders(value),
+            body: "{}",
+          },
+          { area: "Настройки", action: "Проверка подключения" },
+        ),
       );
       setSuccess(true);
       toast.success("Подключение работает");
     } catch (error) {
+      logAppError("Настройки", error, { action: "Проверка подключения" });
       toast.error(error instanceof Error ? error.message : "Ошибка подключения");
     } finally {
       setChecking(false);

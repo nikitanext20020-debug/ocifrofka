@@ -26,6 +26,7 @@ import { parseRecognitionSession } from "@/lib/recognition-session";
 import { extractedRecordResponseSchema } from "@/lib/schemas";
 import { FIELD_LABELS, RECORD_FIELDS, type AppSettings, type ExtractedRecord, type RecordField } from "@/lib/types";
 import { downloadBlob, agentHeaders, readApiResponse, cn } from "@/lib/utils";
+import { loggedFetch, logAppError } from "@/lib/app-logs";
 import { recordsToCsv } from "@/lib/table-utils";
 import { correctBogorodskyAddress } from "@/lib/address-correction";
 import { Button, Card, EmptyState, Input, SectionTitle } from "@/components/ui";
@@ -94,6 +95,7 @@ export function RecognitionTab({
       setImages((current) => [...current, ...next]);
       toast.success(`Добавлено изображений: ${next.length}`);
     } catch (error) {
+      logAppError("Распознавание", error, { action: "Подготовка файлов", requestedCount: valid.length });
       toast.error(error instanceof Error ? error.message : "Не удалось обработать файлы");
     } finally {
       setConverting(false);
@@ -121,7 +123,7 @@ export function RecognitionTab({
       await runPromisePool({
         items: selectedImages,
         concurrency: normalizeParallelRequests(settings.parallelRequests),
-        task: async (image) => {
+        task: async (image, index) => {
           setImages((current) => current.map((item) => (
             item.id === image.id ? { ...item, status: "processing", error: undefined } : item
           )));
@@ -135,6 +137,12 @@ export function RecognitionTab({
               method: "POST",
               headers: agentHeaders(activeVisionAgent),
               body: JSON.stringify({ image: compressed, prompt: settings.extractionPrompt }),
+            }, {
+              fetcher: (input, init) => loggedFetch(input, init, {
+                area: "Распознавание",
+                action: "Распознавание страницы",
+                details: { batchPosition: index + 1, batchCount: selectedImages.length },
+              }),
             }),
           );
           const parsed = extractedRecordResponseSchema.parse(payload);
@@ -151,7 +159,7 @@ export function RecognitionTab({
             thumbnail: await createThumbnail(image.dataUrl),
           } satisfies ExtractedRecord;
         },
-        onSettled: (result, image) => {
+        onSettled: (result, image, index) => {
           if (result.status === "fulfilled") {
             successful += 1;
             onRecordsChange((current) => {
@@ -164,6 +172,7 @@ export function RecognitionTab({
             const message = result.reason instanceof Error
               ? result.reason.message
               : "Неизвестная ошибка распознавания";
+            logAppError("Распознавание", result.reason, { action: "Обработка страницы", batchPosition: index + 1, batchCount: selectedImages.length });
             setImages((current) => current.map((item) => (
               item.id === image.id ? { ...item, status: "error", error: message } : item
             )));
@@ -208,7 +217,8 @@ export function RecognitionTab({
       onRecordsChange((current) => [...current, ...imported]);
       setSessionPage(Math.floor(records.length / SESSION_PAGE_SIZE));
       toast.success(`Импортировано записей: ${imported.length}`);
-    } catch {
+    } catch (error) {
+      logAppError("Распознавание", error, { action: "Импорт сессии" });
       toast.error("Не удалось импортировать JSON: выберите файл, экспортированный из сессии распознавания");
     } finally {
       setImportingJson(false);
