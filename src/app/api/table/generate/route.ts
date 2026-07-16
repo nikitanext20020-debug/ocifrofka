@@ -5,9 +5,22 @@ import { normalizeBirthDate } from "@/lib/date-utils";
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
-const generatedRowsSchema = z.object({
-  rows: z.array(z.array(z.string())),
-});
+const generatedCellSchema = z.preprocess(
+  (value) => value === null || value === undefined ? "" : String(value),
+  z.string(),
+);
+
+const generatedRowsSchema = z.preprocess(
+  (value) => {
+    if (Array.isArray(value)) return { rows: value };
+    if (value && typeof value === "object") {
+      if ("data" in value && Array.isArray(value.data)) return { rows: value.data };
+      if ("generatedRows" in value && Array.isArray(value.generatedRows)) return { rows: value.generatedRows };
+    }
+    return value;
+  },
+  z.object({ rows: z.array(z.array(generatedCellSchema)) }),
+);
 
 const bodySchema = z.object({
   count: z.number().int().min(1).max(100),
@@ -36,6 +49,20 @@ function normalized(value: unknown) {
     .replaceAll("ё", "е")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function isPhoneHeader(header: string) {
+  const value = normalized(header);
+  return value.includes("телефон") || value.includes("номер мобильного");
+}
+
+function syntheticPhone(index: number) {
+  // Keep generated test data obviously synthetic, but varied enough to avoid
+  // looking like a placeholder copied into every row. The leading plus is
+  // intentionally omitted because spreadsheets may parse it as a formula.
+  const operator = 900 + ((index * 47 + 13) % 100);
+  const subscriber = String((1_000_003 + index * 7_919) % 10_000_000).padStart(7, "0");
+  return `7(${operator})${subscriber.slice(0, 3)}-${subscriber.slice(3, 5)}-${subscriber.slice(5)}`;
 }
 
 function topicWords(value: string) {
@@ -122,8 +149,12 @@ function validateAndNormalizeRows(rows: string[][], body: z.infer<typeof bodySch
   const fixedColumns = Object.entries(body.fixedValues)
     .map(([header, value]) => ({ column: body.headers.indexOf(header), value }))
     .filter(({ column, value }) => column >= 0 && value.trim());
+  const phoneColumns = body.headers
+    .map((header, column) => ({ header, column }))
+    .filter(({ header }) => isPhoneHeader(header))
+    .map(({ column }) => column);
 
-  const normalizedRows = rows.map((source) => {
+  const normalizedRows = rows.map((source, index) => {
     const row = source.map((value) => String(value ?? "").trim());
     for (const { column, values } of categoricalColumns) {
       const canonical = values.find((candidate) => normalized(candidate) === normalized(row[column]));
@@ -136,6 +167,9 @@ function validateAndNormalizeRows(rows: string[][], body: z.infer<typeof bodySch
       if (normalized(header).includes("дата рождения") && row[column]) {
         row[column] = normalizeBirthDate(row[column], body.formats.birth_date ?? "ДД.ММ.ГГГГ");
       }
+    });
+    phoneColumns.forEach((column) => {
+      row[column] = syntheticPhone(index);
     });
 
     const key = JSON.stringify(row.map(normalized));

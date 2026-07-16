@@ -224,7 +224,7 @@ export async function callStructured<T>(options: {
 }) {
   let lastError: unknown;
   let previousContent = "";
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       const messages: ChatMessage[] =
         attempt === 0
