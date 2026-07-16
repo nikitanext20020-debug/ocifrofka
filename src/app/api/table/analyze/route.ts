@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { apiError, callStructured, readAgentConfig } from "@/lib/model-client";
 import { tableAnalysisSchema } from "@/lib/schemas";
-import { refineColumnMapping } from "@/lib/column-mapping";
+import { analyzeTableDeterministically, refineColumnMapping } from "@/lib/column-mapping";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -13,8 +13,11 @@ const bodySchema = z.object({
 
 export async function POST(request: Request) {
   try {
-    const config = readAgentConfig(request);
     const body = bodySchema.parse(await request.json());
+    const localAnalysis = analyzeTableDeterministically(body.headers, body.rows);
+    if (localAnalysis) return Response.json(localAnalysis);
+
+    const config = readAgentConfig(request);
     const result = await callStructured({
       config,
       schema: tableAnalysisSchema,
