@@ -68,10 +68,20 @@ export const normalizedRecordsSchema = z.preprocess(
   z.object({ records: z.array(normalizedRecordSchema) }),
 );
 
-export const cellChangeSchema = z.object({
-  row: z.number().int().nonnegative(),
-  column: z.number().int().nonnegative(),
+const cellChangeSchema = z.object({
+  row: z.coerce.number().int().nonnegative(),
+  column: z.coerce.number().int().nonnegative(),
   value: z.union([z.string(), z.number(), z.boolean()]).transform(String),
 });
 
-export const cellChangesSchema = z.object({ changes: z.array(cellChangeSchema) });
+export const cellChangesSchema = z.preprocess(
+  (value) => {
+    if (Array.isArray(value)) return { changes: value };
+    if (value && typeof value === "object") {
+      if ("data" in value && Array.isArray(value.data)) return { changes: value.data };
+      if ("updates" in value && Array.isArray(value.updates)) return { changes: value.updates };
+    }
+    return value;
+  },
+  z.object({ changes: z.array(cellChangeSchema) }),
+);

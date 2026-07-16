@@ -74,7 +74,7 @@ function normalizedHeader(value: string) {
 
 function isDerivedCategoryHeader(value: string) {
   const header = normalizedHeader(value);
-  return header === "тематика предложения" || header === "тематика обращения" || header === "направление обращения";
+  return header.startsWith("тематика предложения") || header.startsWith("тематика обращения") || header.startsWith("направление обращения");
 }
 
 function isGeneratorCategoricalHeader(value: string) {
@@ -93,7 +93,7 @@ function isNamePartField(field: MappableField): field is NamePartField {
 }
 
 function isStructuredModelFormatError(error: unknown) {
-  return error instanceof Error && error.message.startsWith("Модель дважды вернула неверный формат");
+  return error instanceof Error && /^Модель (?:дважды|трижды) вернула неверный формат/.test(error.message);
 }
 
 async function runBatches<T>(tasks: Array<() => Promise<T[]>>) {
@@ -412,7 +412,7 @@ export function ExcelTab({
       const columnCategoricals: Record<string, string[]> = {};
       for (const [colIdx, values] of Object.entries(analysis.categoricals)) {
         const headerName = table.headers[Number(colIdx)];
-        if (headerName) columnCategoricals[headerName] = values;
+        if (headerName && isDerivedCategoryHeader(headerName)) columnCategoricals[headerName] = values;
       }
       const examples = workingTable.rows
         .filter((row) => Object.values(analysis.mapping).every((column) => column === null || String(row[column] ?? "").trim()))
@@ -444,7 +444,10 @@ export function ExcelTab({
       }
       const { results: changes, errors } = await runBatches(tasks);
       const allowed = new Set(gaps.map(({ row, column }) => `${row}:${column}`));
-      const applied = applyCellChanges(workingTable.rows, changes, allowed, true);
+      // `gaps` already contains only empty cells or intentionally short topics;
+      // allow the latter to be refined while keeping every other cell protected
+      // by the explicit `allowed` set.
+      const applied = applyCellChanges(workingTable.rows, changes, allowed);
       if (!applied.applied.length) {
         if (fixed.applied.length) {
           pushSnapshot();

@@ -32,15 +32,22 @@ function normalizedValue(value: string) {
 function acceptedChanges(
   changes: CellChange[],
   gaps: Gap[],
+  rows: FillBody["rows"],
   headers: string[],
   categoricals: Record<string, string[]>,
   birthDateFormat: string,
 ) {
   const allowed = new Set(gaps.map(({ row, column }) => cellKey(row, column)));
+  const absoluteRows = new Set(rows.map(({ row }) => row));
   const accepted = new Map<string, CellChange>();
 
   for (const change of changes) {
-    const key = cellKey(change.row, change.column);
+    // Some OpenAI-compatible models number rows from zero inside the batch,
+    // despite the prompt asking for absolute spreadsheet row indexes.
+    const row = absoluteRows.has(change.row)
+      ? change.row
+      : rows[change.row]?.row ?? change.row;
+    const key = cellKey(row, change.column);
     if (!allowed.has(key)) continue;
 
     let value = String(change.value ?? "").trim();
@@ -58,7 +65,7 @@ function acceptedChanges(
       value = normalizeBirthDate(value, birthDateFormat);
     }
 
-    accepted.set(key, { ...change, value });
+    accepted.set(key, { ...change, row, value });
   }
 
   return accepted;
@@ -135,13 +142,13 @@ export async function POST(request: Request) {
 
     const birthDateFormat = body.formats.birth_date ?? "DD.MM.YYYY";
     const first = await generateChanges(config, body, body.rows, safeGaps);
-    const accepted = acceptedChanges(first.changes, safeGaps, body.headers, body.categoricals, birthDateFormat);
+    const accepted = acceptedChanges(first.changes, safeGaps, body.rows, body.headers, body.categoricals, birthDateFormat);
     let missing = safeGaps.filter(({ row, column }) => !accepted.has(cellKey(row, column)));
 
     if (missing.length) {
       const retryRows = rowsWithChanges(body.rows, accepted.values());
       const second = await generateChanges(config, body, retryRows, missing, true);
-      const retryAccepted = acceptedChanges(second.changes, missing, body.headers, body.categoricals, birthDateFormat);
+      const retryAccepted = acceptedChanges(second.changes, missing, body.rows, body.headers, body.categoricals, birthDateFormat);
       for (const [key, change] of retryAccepted) accepted.set(key, change);
       missing = safeGaps.filter(({ row, column }) => !accepted.has(cellKey(row, column)));
     }

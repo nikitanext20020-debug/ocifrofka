@@ -7,7 +7,7 @@ import {
   normalizeAssistantContent,
   parseJsonContent,
 } from "@/lib/model-client";
-import { extractedRecordResponseSchema } from "@/lib/schemas";
+import { cellChangesSchema, extractedRecordResponseSchema } from "@/lib/schemas";
 
 describe("parseJsonContent", () => {
   it("parses JSON from a Markdown fence", () => {
@@ -105,6 +105,20 @@ describe("callStructured", () => {
         content: "Предыдущий ответ был пустым. Верни только валидный JSON строго по заданной структуре, без Markdown и пояснений.",
       },
     ]);
+  });
+});
+
+describe("cellChangesSchema", () => {
+  it("accepts direct arrays and string row indexes from providers", () => {
+    expect(cellChangesSchema.parse([
+      { row: "12", column: "3", value: "готово" },
+    ])).toEqual({ changes: [{ row: 12, column: 3, value: "готово" }] });
+  });
+
+  it("accepts an updates envelope", () => {
+    expect(cellChangesSchema.parse({
+      updates: [{ row: 1, column: 2, value: true }],
+    })).toEqual({ changes: [{ row: 1, column: 2, value: "true" }] });
   });
 });
 

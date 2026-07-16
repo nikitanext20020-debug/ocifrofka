@@ -123,6 +123,27 @@ describe("findGapCells", () => {
 
     expect(findGapCells(table, mapping, [1])).toEqual([{ row: 1, column: 1 }]);
   });
+
+  it("marks a short topic for refinement and allows that intentional replacement", () => {
+    const table = {
+      headers: ["Текст наказа", "Направление обращения"],
+      rows: [["дороги", ""]],
+    };
+    const mapping: ColumnMapping = {
+      topic: 0,
+      full_name: null,
+      last_name: null,
+      first_name: null,
+      middle_name: null,
+      birth_date: null,
+      address: null,
+      phone: null,
+    };
+    const gaps = findGapCells(table, mapping, [0]);
+    expect(gaps).toEqual([{ row: 0, column: 0 }, { row: 0, column: 1 }]);
+    expect(applyCellChanges(table.rows, [{ row: 0, column: 0, value: "Ремонт дороги" }], new Set(["0:0"])).rows)
+      .toEqual([["Ремонт дороги", ""]]);
+  });
 });
 
 describe("applyFixedColumnValues", () => {
