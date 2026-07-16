@@ -30,6 +30,11 @@ type CellEdit = {
   value: string;
 };
 
+type WorkbookLike = {
+  SheetNames: string[];
+  Sheets: Record<string, Parameters<typeof RealXLSX.utils.sheet_to_json>[0]>;
+};
+
 type ZipEntry = {
   name: string;
   versionMadeBy: number;
@@ -99,7 +104,7 @@ function displayValue(value: unknown) {
   return String(value ?? "");
 }
 
-function collectSheetEdits(output: any, name: string, layout: SheetLayout): CellEdit[] {
+function collectSheetEdits(output: WorkbookLike, name: string, layout: SheetLayout): CellEdit[] {
   const outputSheet = output.Sheets[name];
   if (!outputSheet) return [];
 
@@ -184,10 +189,6 @@ function columnIndex(reference: string) {
 
 function cellReference(column: number, row: number) {
   return `${columnName(column)}${row}`;
-}
-
-function findDirectChild(parent: Element, localName: string) {
-  return Array.from(parent.children).find((child) => child.localName === localName) ?? null;
 }
 
 function ensureRow(document: XMLDocument, sheetData: Element, rowNumber: number) {
@@ -523,7 +524,7 @@ function saveBytes(bytes: Uint8Array, fileName: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-async function writePreservingOriginal(output: any, fileName: string) {
+async function writePreservingOriginal(output: WorkbookLike, fileName: string) {
   if (!session) throw new Error("Original workbook is unavailable");
   const entries = parseZip(session.bytes);
   const entryByName = new Map(entries.map((entry) => [entry.name, entry]));
@@ -547,7 +548,7 @@ async function writePreservingOriginal(output: any, fileName: string) {
   saveBytes(await writeZip(entries, replacements), fileName);
 }
 
-export function writeFile(output: any, fileName: string, options?: unknown) {
+export function writeFile(output: WorkbookLike, fileName: string, options?: unknown) {
   if (!session || !/\.xlsx$/i.test(fileName)) {
     return RealXLSX.writeFile(output, fileName, options);
   }

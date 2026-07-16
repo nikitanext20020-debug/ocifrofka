@@ -1,26 +1,14 @@
 import { z } from "zod";
 import { apiError, callStructured, readAgentConfig } from "@/lib/model-client";
 import { normalizeBirthDate } from "@/lib/date-utils";
+import {
+  generatedRowsSchema,
+  normalizeGeneratedModelRows,
+  type GeneratedRowSource,
+} from "@/lib/generated-rows";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
-
-const generatedCellSchema = z.preprocess(
-  (value) => value === null || value === undefined ? "" : String(value),
-  z.string(),
-);
-
-const generatedRowsSchema = z.preprocess(
-  (value) => {
-    if (Array.isArray(value)) return { rows: value };
-    if (value && typeof value === "object") {
-      if ("data" in value && Array.isArray(value.data)) return { rows: value.data };
-      if ("generatedRows" in value && Array.isArray(value.generatedRows)) return { rows: value.generatedRows };
-    }
-    return value;
-  },
-  z.object({ rows: z.array(z.array(generatedCellSchema)) }),
-);
 
 const bodySchema = z.object({
   count: z.number().int().min(1).max(100),
@@ -30,6 +18,7 @@ const bodySchema = z.object({
   categoricals: z.record(z.string(), z.array(z.string()).min(1).max(50)).optional().default({}),
   fixedValues: z.record(z.string(), z.string()).optional().default({}),
   instruction: z.string().max(3000).optional().default(""),
+  sequenceStart: z.number().int().nonnegative().optional().default(0),
 });
 
 class GeneratedRowsError extends Error {}
@@ -136,13 +125,19 @@ function topicQualityIssues(rows: string[][], headers: string[], examples: unkno
   return [...new Set(issues)];
 }
 
-function validateAndNormalizeRows(rows: string[][], body: z.infer<typeof bodySchema>) {
-  if (rows.length !== body.count || rows.some((row) => row.length !== body.headers.length)) {
-    throw new GeneratedRowsError("Модель вернула неправильное количество строк или колонок.");
+function validateAndNormalizeRows(sources: GeneratedRowSource[], body: z.infer<typeof bodySchema>) {
+  const allRows = normalizeGeneratedModelRows(sources, body.headers);
+  const rows = allRows.slice(0, body.count);
+  if (!rows.length || rows.every((row) => row.every((value) => !value))) {
+    throw new GeneratedRowsError("Модель не вернула значений для колонок таблицы.");
   }
 
   const examples = new Set(body.examples.map((row) => JSON.stringify(row.map(normalized))));
   const uniqueRows = new Set<string>();
+  const normalizationIssues: string[] = [];
+  if (allRows.length !== body.count) {
+    normalizationIssues.push(`запрошено строк: ${body.count}, получено: ${allRows.length}`);
+  }
   const categoricalColumns = Object.entries(body.categoricals)
     .map(([header, values]) => ({ column: body.headers.indexOf(header), values }))
     .filter(({ column }) => column >= 0);
@@ -156,12 +151,13 @@ function validateAndNormalizeRows(rows: string[][], body: z.infer<typeof bodySch
 
   const normalizedRows = rows.map((source, index) => {
     const row = source.map((value) => String(value ?? "").trim());
+    for (const { column, value } of fixedColumns) row[column] = value;
     for (const { column, values } of categoricalColumns) {
+      if (fixedColumns.some((fixed) => fixed.column === column)) continue;
       const canonical = values.find((candidate) => normalized(candidate) === normalized(row[column]));
       if (!canonical) throw new GeneratedRowsError(`Модель выбрала недопустимое значение для колонки «${body.headers[column]}».`);
       row[column] = canonical;
     }
-    for (const { column, value } of fixedColumns) row[column] = value;
 
     body.headers.forEach((header, column) => {
       if (normalized(header).includes("дата рождения") && row[column]) {
@@ -169,33 +165,52 @@ function validateAndNormalizeRows(rows: string[][], body: z.infer<typeof bodySch
       }
     });
     phoneColumns.forEach((column) => {
-      row[column] = syntheticPhone(index);
+      row[column] = syntheticPhone(body.sequenceStart + index);
     });
 
     const key = JSON.stringify(row.map(normalized));
-    if (examples.has(key) || uniqueRows.has(key)) throw new GeneratedRowsError("Модель повторила существующую строку.");
+    if (examples.has(key) || uniqueRows.has(key)) normalizationIssues.push("есть строка, совпадающая с другой строкой целиком");
     uniqueRows.add(key);
     return row;
   });
   return {
     rows: normalizedRows,
-    qualityIssues: topicQualityIssues(normalizedRows, body.headers, body.examples),
+    qualityIssues: [...new Set([
+      ...normalizationIssues,
+      ...topicQualityIssues(normalizedRows, body.headers, body.examples),
+    ])],
   };
+}
+
+function rowsForPrompt(rows: unknown[][]) {
+  return rows.map((row) => Object.fromEntries(
+    row
+      .map((value, column) => [String(column), String(value ?? "").trim()] as const)
+      .filter(([, value]) => value),
+  ));
 }
 
 export async function POST(request: Request) {
   try {
     const config = readAgentConfig(request);
     const body = bodySchema.parse(await request.json());
+    const columns = body.headers.map((header, index) => ({
+      index,
+      header,
+      ...(body.categoricals[header] ? { allowedValues: body.categoricals[header] } : {}),
+      ...(body.fixedValues[header] ? { fixedValue: body.fixedValues[header] } : {}),
+    }));
     const generate = (retry = false) => callStructured({
       config,
       schema: generatedRowsSchema,
+      temperature: retry ? 0.8 : 0.7,
       messages: [
         {
           role: "system",
           content: [
             "Создай только синтетические тестовые строки для проверки заполнения Excel-формы.",
-            ` Верни JSON {rows:[...]}: ровно ${body.count} строк, в каждой ровно ${body.headers.length} строковых значений в порядке headers.`,
+            ` Верни JSON {rows:[{"0":"значение",...}]}: ровно ${body.count} строк. Ключи каждой строки — строковые индексы колонок из columns, начиная с нуля.`,
+            " Не полагайся на порядок свойств JSON и не используй заголовки как ключи. Для каждой колонки из columns верни значение по её index; если значение действительно не предусмотрено формой, верни пустую строку.",
             " Не копируй из examples ФИО, адреса, телефоны, электронную почту или целые обращения. Все записи должны отличаться друг от друга и от примеров.",
             " ФИО должны быть вымышленными, но грамматически согласованными. Телефоны, даты рождения, адреса и остальные поля оформляй точно в стиле examples.",
             " Для текста обращения соблюдай пользовательскую инструкцию и стиль примеров, но создавай новый текст.",
@@ -204,44 +219,32 @@ export async function POST(request: Request) {
             " Не более 40% текстов могут начинаться с повелительного глагола. Используй минимум три разных типа начала: действие, обстоятельство, люди, конкретный факт или наблюдение. Не копируй соседний текст, заменяя только улицу, город или объект. Не используй длинное тире.",
             " Не добавляй политическую принадлежность от имени вымышленных людей: если для колонки вовлечённости доступно значение «Иное», используй его.",
             " Не добавляй пояснений, Markdown и заголовков.",
-            `\nЗаголовки по порядку:\n${body.headers.map((header, index) => `${index}: ${header}`).join("\n")}`,
-            body.examples.length ? `\nПримеры только для формата и стиля:\n${JSON.stringify(body.examples)}` : "",
-            Object.keys(body.categoricals).length
-              ? `\nДля категориальных колонок используй только эти значения:\n${Object.entries(body.categoricals).map(([header, values]) => `- ${header}: [${values.map((value) => `«${value}»`).join(", ")}]`).join("\n")}`
-              : "",
-            Object.keys(body.fixedValues).length
-              ? `\nФиксированные значения колонок:\n${Object.entries(body.fixedValues).map(([header, value]) => `- ${header}: «${value}»`).join("\n")}`
-              : "",
             body.instruction.trim() ? `\nДополнительная инструкция пользователя:\n${body.instruction.trim()}` : "",
             `\nСтруктурный план текстов по порядку строк. Не копируй формулировку плана в результат:\n${Array.from({ length: body.count }, (_, index) => `${index + 1}: ${TEXT_STRUCTURES[(index * 5 + (retry ? 1 : 0)) % TEXT_STRUCTURES.length]}`).join("\n")}`,
             retry ? "\nПредыдущий вариант оказался слишком шаблонным или нарушил формат. Полностью перепиши строки, особенно начала обращений, и строго соблюдай два коротких предложения." : "",
           ].join(""),
         },
-        { role: "user", content: JSON.stringify({ count: body.count, headers: body.headers }) },
+        {
+          role: "user",
+          content: JSON.stringify({
+            count: body.count,
+            columns,
+            formats: body.formats,
+            examples: rowsForPrompt(body.examples),
+          }),
+        },
       ],
     });
 
     const first = await generate();
     try {
       const firstValidated = validateAndNormalizeRows(first.rows, body);
-      if (!firstValidated.qualityIssues.length) return Response.json(firstValidated);
-
-      const second = await generate(true);
-      try {
-        const secondValidated = validateAndNormalizeRows(second.rows, body);
-        return Response.json({
-          ...secondValidated,
-          ...(secondValidated.qualityIssues.length
-            ? { warning: `Строки созданы, но проверьте тексты: ${secondValidated.qualityIssues.join("; ")}.` }
-            : {}),
-        });
-      } catch (retryError) {
-        if (!(retryError instanceof GeneratedRowsError)) throw retryError;
-        return Response.json({
-          rows: firstValidated.rows,
-          warning: `Строки созданы, но повторная проверка не улучшила тексты: ${firstValidated.qualityIssues.join("; ")}.`,
-        });
-      }
+      return Response.json({
+        rows: firstValidated.rows,
+        ...(firstValidated.qualityIssues.length
+          ? { warning: `Строки созданы, но проверьте результат: ${firstValidated.qualityIssues.join("; ")}.` }
+          : {}),
+      });
     } catch (error) {
       if (!(error instanceof GeneratedRowsError)) throw error;
       const second = await generate(true);

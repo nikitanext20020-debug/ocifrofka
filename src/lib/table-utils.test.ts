@@ -61,6 +61,18 @@ describe("mergeGeneratedRowsAt", () => {
     ]);
     expect(result.writtenRows).toEqual([0, 1]);
   });
+
+  it("does not report a generated row when no model value was inserted", () => {
+    const result = mergeGeneratedRowsAt(
+      { headers: ["Фамилия", "Имя"], rows: [["Иванов", "Иван"]] },
+      [["Петров", "Пётр"], ["", ""]],
+      0,
+    );
+
+    expect(result.rows).toEqual([["Иванов", "Иван"]]);
+    expect(result.writtenRows).toEqual([]);
+    expect(result.applied).toEqual([]);
+  });
 });
 
 describe("applyRecordCategories", () => {
