@@ -11,6 +11,20 @@ import { NAME_PART_FIELDS, RECORD_FIELDS } from "@/lib/types";
 import { findDescriptiveHeaderRowIndex } from "@/lib/column-mapping";
 
 const MAPPABLE_FIELDS = [...RECORD_FIELDS, ...NAME_PART_FIELDS] as const;
+const SPREADSHEET_ERROR_VALUES = new Set([
+  "#CALC!",
+  "#DIV/0!",
+  "#ERROR!",
+  "#FIELD!",
+  "#GETTING_DATA",
+  "#N/A",
+  "#NAME?",
+  "#NULL!",
+  "#NUM!",
+  "#REF!",
+  "#SPILL!",
+  "#VALUE!",
+]);
 
 function normalizedHeader(value: string) {
   return value.toLocaleLowerCase("ru-RU").replaceAll("ё", "е").replace(/[^a-zа-я0-9]+/gi, " ").trim();
@@ -206,7 +220,7 @@ export function mergeGeneratedRowsAt(table: TableData, generatedRows: string[][]
 
 export function isEmptyCell(value: unknown) {
   const normalized = String(value ?? "").trim();
-  return !normalized || normalized === "-";
+  return !normalized || normalized === "-" || SPREADSHEET_ERROR_VALUES.has(normalized.toUpperCase());
 }
 
 export function findGapCells(
@@ -268,7 +282,7 @@ export function findInsertRow(table: TableData, mapping: ColumnMapping): number 
   for (const col of mappedColumns) {
     const nonEmpty = table.rows
       .map((row) => String(row[col] ?? "").trim())
-      .filter((v) => v !== "" && v !== "-");
+      .filter((v) => !isEmptyCell(v));
     if (nonEmpty.length < 2) continue;
     const freq = new Map<string, number>();
     for (const v of nonEmpty) freq.set(v, (freq.get(v) ?? 0) + 1);
@@ -281,10 +295,7 @@ export function findInsertRow(table: TableData, mapping: ColumnMapping): number 
 
   for (let i = table.rows.length - 1; i >= 0; i--) {
     const row = table.rows[i];
-    const hasData = activeCols.some((col) => {
-      const v = String(row[col] ?? "").trim();
-      return v !== "" && v !== "-";
-    });
+    const hasData = activeCols.some((col) => !isEmptyCell(row[col]));
     if (hasData) return i + 1;
   }
   return 0;
@@ -307,8 +318,7 @@ export function mergeRecordsAt(
     for (const field of MAPPABLE_FIELDS) {
       const col = mapping[field];
       if (col === null || col >= (next[rowIndex]?.length ?? 0)) continue;
-      const existing = String(next[rowIndex][col] ?? "").trim();
-      if (!existing || existing === "-") {
+      if (isEmptyCell(next[rowIndex][col])) {
         next[rowIndex][col] = values[field];
       }
     }

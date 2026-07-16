@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendRecords, applyCellChanges, applyFixedColumnValues, applyRecordCategories, findGapCells, findInsertRow, markSyntheticRowsForExport, mergeGeneratedRowsAt, mergeRecordsAt, normalizeTable, recordsToCsv, splitFullName } from "@/lib/table-utils";
+import { appendRecords, applyCellChanges, applyFixedColumnValues, applyRecordCategories, findGapCells, findInsertRow, isEmptyCell, markSyntheticRowsForExport, mergeGeneratedRowsAt, mergeRecordsAt, normalizeTable, recordsToCsv, splitFullName } from "@/lib/table-utils";
 import type { ColumnMapping, ExtractedRecord } from "@/lib/types";
 
 describe("normalizeTable", () => {
@@ -29,6 +29,14 @@ describe("normalizeTable", () => {
       headers: ["ФИО", "Телефон"],
       rows: [["Иванов", "7999"]],
     });
+  });
+});
+
+describe("isEmptyCell", () => {
+  it("treats spreadsheet error values as replaceable cells", () => {
+    expect(isEmptyCell("#ERROR!")).toBe(true);
+    expect(isEmptyCell("#REF!")).toBe(true);
+    expect(isEmptyCell("обычный текст")).toBe(false);
   });
 });
 
@@ -192,6 +200,18 @@ describe("findInsertRow", () => {
     expect(findInsertRow(table, mapping)).toBe(2);
   });
 
+  it("ignores formula errors below the last real-data row", () => {
+    const table = {
+      headers: ["Округ", "ФИО", "Телефон", "Тема"],
+      rows: [
+        ["Богородский г.о.", "Иванов Иван", "8999", "Дорога"],
+        ["Богородский г.о.", "", "#ERROR!", ""],
+        ["Богородский г.о.", "", "#ERROR!", ""],
+      ],
+    };
+    expect(findInsertRow(table, mapping)).toBe(1);
+  });
+
   it("returns 0 when the table has no rows", () => {
     expect(findInsertRow({ headers: ["ФИО"], rows: [] }, { topic: null, full_name: 0, last_name: null, first_name: null, middle_name: null, birth_date: null, address: null, phone: null })).toBe(0);
   });
@@ -241,6 +261,15 @@ describe("mergeRecordsAt", () => {
     };
     const { rows } = mergeRecordsAt(table, [record], mapping, 0);
     expect(rows[0][1]).toBe("Уже есть"); // NOT overwritten
+  });
+
+  it("replaces spreadsheet formula errors with recognized values", () => {
+    const table = {
+      headers: ["Округ", "ФИО", "Телефон", "Тема"],
+      rows: [["Богородский г.о.", "", "#ERROR!", ""]],
+    };
+    const { rows } = mergeRecordsAt(table, [record], mapping, 0);
+    expect(rows[0][2]).toBe("8777");
   });
 
   it("does not add rows beyond the table length", () => {
