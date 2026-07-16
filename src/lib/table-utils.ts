@@ -60,9 +60,14 @@ export function splitFullName(value: string): Record<NamePartField, string> {
   };
 }
 
+export function normalizePhone(value: string) {
+  return value.replaceAll("+", "").trim();
+}
+
 function valuesForMapping(record: Record<RecordField, string>) {
   return {
     ...record,
+    phone: normalizePhone(record.phone),
     ...splitFullName(record.full_name),
   } satisfies Record<MappableField, string>;
 }
@@ -268,7 +273,7 @@ export function findGapCells(
 
 export function recordForApi(record: ExtractedRecord) {
   return Object.fromEntries(
-    RECORD_FIELDS.map((field) => [field, record[field]]),
+    RECORD_FIELDS.map((field) => [field, field === "phone" ? normalizePhone(record[field]) : record[field]]),
   ) as Record<RecordField, string>;
 }
 
@@ -337,7 +342,7 @@ export function recordsToCsv(records: ExtractedRecord[]) {
       record.full_name,
       record.birth_date,
       record.address,
-      record.phone,
+      normalizePhone(record.phone),
       record.confidence_notes,
     ]
       .map(escape)
