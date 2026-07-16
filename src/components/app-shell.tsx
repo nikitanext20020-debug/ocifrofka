@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { FileSpreadsheet, ScanLine, Settings2, ShieldCheck } from "lucide-react";
 import { Toaster, toast } from "sonner";
 import { DEFAULT_SETTINGS } from "@/lib/constants";
+import { compactRecordsForStorage } from "@/lib/recognition-session";
 import type { AppSettings, ExtractedRecord } from "@/lib/types";
 import { normalizeSettings } from "@/lib/vision-agents";
 import { useLocalStorage } from "@/lib/use-local-storage";
@@ -25,8 +26,16 @@ const TABS = [
 export function AppShell() {
   const [tab, setTab] = useState<Tab>("recognition");
   const [settings, setSettings] = useLocalStorage<AppSettings>("digitizer-settings", DEFAULT_SETTINGS);
-  const [records, setRecords] = useLocalStorage<ExtractedRecord[]>("digitizer-session", EMPTY_RECORDS);
-  const [queue, setQueue] = useLocalStorage<ExtractedRecord[]>("digitizer-excel-queue", EMPTY_RECORDS);
+  const [records, setRecords] = useLocalStorage<ExtractedRecord[]>(
+    "digitizer-session",
+    EMPTY_RECORDS,
+    compactRecordsForStorage,
+  );
+  const [queue, setQueue] = useLocalStorage<ExtractedRecord[]>(
+    "digitizer-excel-queue",
+    EMPTY_RECORDS,
+    compactRecordsForStorage,
+  );
 
   useEffect(() => {
     const handleQuota = () => toast.error("Хранилище браузера заполнено. Экспортируйте сессию и удалите часть записей.");
