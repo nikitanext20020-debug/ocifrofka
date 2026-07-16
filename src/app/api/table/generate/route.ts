@@ -5,9 +5,22 @@ import { normalizeBirthDate } from "@/lib/date-utils";
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
-const generatedRowsSchema = z.object({
-  rows: z.array(z.array(z.string())),
-});
+const generatedCellSchema = z.preprocess(
+  (value) => value === null || value === undefined ? "" : String(value),
+  z.string(),
+);
+
+const generatedRowsSchema = z.preprocess(
+  (value) => {
+    if (Array.isArray(value)) return { rows: value };
+    if (value && typeof value === "object") {
+      if ("data" in value && Array.isArray(value.data)) return { rows: value.data };
+      if ("generatedRows" in value && Array.isArray(value.generatedRows)) return { rows: value.generatedRows };
+    }
+    return value;
+  },
+  z.object({ rows: z.array(z.array(generatedCellSchema)) }),
+);
 
 const bodySchema = z.object({
   count: z.number().int().min(1).max(100),
