@@ -144,13 +144,19 @@ export async function POST(request: Request) {
     const first = await generateChanges(config, body, body.rows, safeGaps);
     const accepted = acceptedChanges(first.changes, safeGaps, body.rows, body.headers, body.categoricals, birthDateFormat);
     let missing = safeGaps.filter(({ row, column }) => !accepted.has(cellKey(row, column)));
+    let warning: string | undefined;
 
     if (missing.length) {
-      const retryRows = rowsWithChanges(body.rows, accepted.values());
-      const second = await generateChanges(config, body, retryRows, missing, true);
-      const retryAccepted = acceptedChanges(second.changes, missing, body.rows, body.headers, body.categoricals, birthDateFormat);
-      for (const [key, change] of retryAccepted) accepted.set(key, change);
-      missing = safeGaps.filter(({ row, column }) => !accepted.has(cellKey(row, column)));
+      try {
+        const retryRows = rowsWithChanges(body.rows, accepted.values());
+        const second = await generateChanges(config, body, retryRows, missing, true);
+        const retryAccepted = acceptedChanges(second.changes, missing, body.rows, body.headers, body.categoricals, birthDateFormat);
+        for (const [key, change] of retryAccepted) accepted.set(key, change);
+        missing = safeGaps.filter(({ row, column }) => !accepted.has(cellKey(row, column)));
+      } catch (error) {
+        if (!accepted.size) throw error;
+        warning = "Часть пропусков заполнена; повторная попытка для оставшихся ячеек не удалась.";
+      }
     }
 
     const changes = safeGaps
@@ -161,7 +167,7 @@ export async function POST(request: Request) {
       return Response.json({ error: "Модель не предложила допустимых значений. Повторите действие." }, { status: 502 });
     }
 
-    return Response.json({ changes, missing: missing.length });
+    return Response.json({ changes, missing: missing.length, ...(warning ? { warning } : {}) });
   } catch (error) {
     if (error instanceof z.ZodError) {
       return Response.json({ error: "Не удалось подготовить пропуски." }, { status: 400 });

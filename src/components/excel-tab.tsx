@@ -20,6 +20,7 @@ import {
   applyRecordCategories,
   findGapCells,
   findInsertRow,
+  isEmptyCell,
   markSyntheticRowsForExport,
   mergeGeneratedRowsAt,
   mergeRecordsAt,
@@ -288,9 +289,9 @@ export function ExcelTab({
         const valueSet = new Set<string>();
         for (const row of table.rows) {
           const val = String(row[colIndex] ?? "").trim();
-          if (val && val !== "-") valueSet.add(val);
+          if (!isEmptyCell(val)) valueSet.add(val);
         }
-        if (valueSet.size >= 2 && valueSet.size <= 30) {
+        if (valueSet.size <= 30 && (valueSet.size >= 2 || (valueSet.size === 1 && isGeneratorCategoricalHeader(header)))) {
           categoricals[colIndex] = [...valueSet].sort();
         }
       });
@@ -419,12 +420,13 @@ export function ExcelTab({
         .slice(0, 10);
       const groupedRows = [...new Set(gaps.map(({ row }) => row))];
       const tasks: Array<() => Promise<CellChange[]>> = [];
+      const batchWarnings: string[] = [];
       for (let start = 0; start < groupedRows.length; start += BATCH_SIZE) {
         const rowIndexes = groupedRows.slice(start, start + BATCH_SIZE);
         const rowSet = new Set(rowIndexes);
         const batchGaps = gaps.filter(({ row }) => rowSet.has(row));
         tasks.push(async () => {
-          const result = await readApiResponse<{ changes: CellChange[] }>(
+          const result = await readApiResponse<{ changes: CellChange[]; missing?: number; warning?: string }>(
             await fetch("/api/table/fill-gaps", {
               method: "POST",
               headers: agentHeaders(settings.table),
@@ -439,6 +441,8 @@ export function ExcelTab({
               }),
             }),
           );
+          if (result.warning) batchWarnings.push(result.warning);
+          else if (result.missing) batchWarnings.push(`Не заполнено ячеек: ${result.missing}.`);
           return result.changes;
         });
       }
@@ -461,6 +465,7 @@ export function ExcelTab({
       if (errors.length) {
         toast.warning(`Часть батчей не обработана (${errors.length}). Нажмите «Дополнить пропуски» ещё раз для оставшихся ячеек.`);
       }
+      if (batchWarnings.length) toast.warning([...new Set(batchWarnings)].join(" "));
       pushSnapshot();
       replaceActiveRows(applied.rows);
       setMarks(Object.fromEntries(applied.applied.map(({ row, column }) => [`${row}:${column}`, "generated"] as const)));
@@ -498,6 +503,7 @@ export function ExcelTab({
           .map(([rawColumn, value]) => [table.headers[Number(rawColumn)], value] as const)
           .filter(([header, value]) => Boolean(header && value)),
       );
+      const startIndex = insertRow ?? findInsertRow(table, analysis.mapping);
       const result = await readApiResponse<{ rows: string[][]; warning?: string }>(
         await fetch("/api/table/generate", {
           method: "POST",
@@ -510,12 +516,15 @@ export function ExcelTab({
             categoricals,
             fixedValues,
             instruction: generationInstruction.trim(),
+            sequenceStart: startIndex,
           }),
         }),
       );
 
-      const startIndex = insertRow ?? findInsertRow(table, analysis.mapping);
       const merged = mergeGeneratedRowsAt(table, result.rows, startIndex);
+      if (!merged.applied.length) {
+        throw new Error("Модель вернула строки, но ни одно значение не попало в свободные ячейки. Проверьте строку начала вставки.");
+      }
       const fixed = applyFixedColumnValues(merged.rows, merged.writtenRows, categoricalDefaults);
       const allApplied = [...merged.applied, ...fixed.applied];
       pushSnapshot();
@@ -523,7 +532,7 @@ export function ExcelTab({
       setNewRows(merged.writtenRows);
       setSyntheticRows((current) => [...new Set([...current, ...merged.writtenRows])]);
       setMarks(Object.fromEntries(allApplied.map(({ row, column }) => [`${row}:${column}`, "generated"] as const)));
-      setInsertRow(startIndex + merged.writtenRows.length);
+      setInsertRow(Math.max(...merged.writtenRows) + 1);
       if (merged.writtenRows.length) showTablePage(Math.floor(merged.writtenRows[0] / TABLE_PAGE_SIZE));
       setNotice(`Создано синтетических тестовых строк: ${merged.writtenRows.length}. При скачивании они будут явно помечены.`);
       toast.success(`Создано тестовых строк: ${merged.writtenRows.length}`);

@@ -213,6 +213,7 @@ async function requestCompletion(
   config: AgentRequestConfig,
   messages: ChatMessage[],
   jsonMode: boolean,
+  temperature = jsonMode ? 0 : 0.2,
 ) {
   const endpoint = await validateBaseUrl(config.baseUrl);
   const controller = new AbortController();
@@ -227,7 +228,7 @@ async function requestCompletion(
       body: JSON.stringify({
         model: config.model,
         messages,
-        temperature: jsonMode ? 0 : 0.2,
+        temperature,
         ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
         ...(jsonMode && config.model.toLocaleLowerCase().includes("deepseek")
           ? { thinking: { type: "disabled" } }
@@ -269,6 +270,7 @@ export async function callStructured<T>(options: {
   config: AgentRequestConfig;
   messages: ChatMessage[];
   schema: ZodType<T>;
+  temperature?: number;
 }) {
   let lastError: unknown;
   let previousContent = "";
@@ -289,7 +291,7 @@ export async function callStructured<T>(options: {
                   : "Предыдущий ответ был пустым. Верни только валидный JSON строго по заданной структуре, без Markdown и пояснений.",
               },
             ];
-      previousContent = await requestCompletion(options.config, messages, true);
+      previousContent = await requestCompletion(options.config, messages, true, options.temperature);
       return options.schema.parse(parseJsonContent(previousContent));
     } catch (error) {
       if (error instanceof ModelApiError && !error.retryable) throw error;

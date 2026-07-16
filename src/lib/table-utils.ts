@@ -209,15 +209,17 @@ export function mergeGeneratedRowsAt(table: TableData, generatedRows: string[][]
   const applied: CellChange[] = [];
 
   generatedRows.forEach((generated, generatedIndex) => {
+    if (!generated.some((value) => value.trim())) return;
     const rowIndex = insertRowIndex + generatedIndex;
     while (next.length <= rowIndex) next.push(Array.from({ length: table.headers.length }, () => ""));
     const target = next[rowIndex];
+    const appliedBefore = applied.length;
     generated.slice(0, table.headers.length).forEach((value, column) => {
       if (!value.trim() || !isEmptyCell(target[column])) return;
       target[column] = value;
       applied.push({ row: rowIndex, column, value });
     });
-    writtenRows.push(rowIndex);
+    if (applied.length > appliedBefore) writtenRows.push(rowIndex);
   });
 
   return { rows: next, writtenRows, applied };
