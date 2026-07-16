@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { FileSpreadsheet, ScanLine, Settings2, ShieldCheck } from "lucide-react";
+import { FileSpreadsheet, ScanLine, ScrollText, Settings2, ShieldCheck } from "lucide-react";
 import { Toaster, toast } from "sonner";
 import { DEFAULT_SETTINGS } from "@/lib/constants";
 import { compactRecordsForStorage } from "@/lib/recognition-session";
@@ -9,17 +9,20 @@ import type { AppSettings, ExtractedRecord } from "@/lib/types";
 import { normalizeSettings } from "@/lib/vision-agents";
 import { useLocalStorage } from "@/lib/use-local-storage";
 import { cn } from "@/lib/utils";
+import { appendAppLog, logAppError } from "@/lib/app-logs";
 import { ExcelTab } from "@/components/excel-tab";
+import { LogsTab } from "@/components/logs-tab";
 import { RecognitionTab } from "@/components/recognition-tab";
 import { SettingsTab } from "@/components/settings-tab";
 
-type Tab = "recognition" | "excel" | "settings";
+type Tab = "recognition" | "excel" | "logs" | "settings";
 
 const EMPTY_RECORDS: ExtractedRecord[] = [];
 
 const TABS = [
   { id: "recognition" as const, label: "Распознавание", icon: ScanLine },
   { id: "excel" as const, label: "Excel", icon: FileSpreadsheet },
+  { id: "logs" as const, label: "Логи", icon: ScrollText },
   { id: "settings" as const, label: "Настройки", icon: Settings2 },
 ];
 
@@ -41,6 +44,23 @@ export function AppShell() {
     const handleQuota = () => toast.error("Хранилище браузера заполнено. Экспортируйте сессию и удалите часть записей.");
     window.addEventListener("storage-quota-error", handleQuota);
     return () => window.removeEventListener("storage-quota-error", handleQuota);
+  }, []);
+
+  useEffect(() => {
+    appendAppLog({
+      level: "info",
+      area: "Приложение",
+      message: "Страница открыта",
+      details: { path: location.pathname, online: navigator.onLine },
+    });
+    const handleError = (event: ErrorEvent) => logAppError("Браузер", event.error ?? event.message);
+    const handleRejection = (event: PromiseRejectionEvent) => logAppError("Браузер", event.reason);
+    window.addEventListener("error", handleError);
+    window.addEventListener("unhandledrejection", handleRejection);
+    return () => {
+      window.removeEventListener("error", handleError);
+      window.removeEventListener("unhandledrejection", handleRejection);
+    };
   }, []);
 
   useEffect(() => {
@@ -98,6 +118,9 @@ export function AppShell() {
         </div>
         <div hidden={tab !== "excel"}>
           <ExcelTab settings={settings} queue={queue} onQueueConsumed={() => setQueue([])} />
+        </div>
+        <div hidden={tab !== "logs"}>
+          <LogsTab />
         </div>
         <div hidden={tab !== "settings"}>
           <SettingsTab settings={settings} onChange={setSettings} />

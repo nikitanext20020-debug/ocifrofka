@@ -46,6 +46,7 @@ import {
   type WorkbookData,
 } from "@/lib/types";
 import { agentHeaders, clone, cn, readApiResponse } from "@/lib/utils";
+import { loggedFetch, logAppError } from "@/lib/app-logs";
 import { Button, Card, EmptyState, SectionTitle } from "@/components/ui";
 
 const BATCH_SIZE = 30;
@@ -239,7 +240,8 @@ export function ExcelTab({
       setNotice(null);
       setTablePage(0);
       toast.success("Таблица загружена");
-    } catch {
+    } catch (error) {
+      logAppError("Excel", error, { action: "Загрузка таблицы" });
       toast.error("Не удалось прочитать файл таблицы");
     } finally {
       setBusy(null);
@@ -276,11 +278,19 @@ export function ExcelTab({
         .filter((row) => row.some((cell) => String(cell ?? "").trim()))
         .slice(0, 20);
       const result = await readApiResponse<{ mapping: ColumnMapping; formats: Record<RecordField, string> }>(
-        await fetch("/api/table/analyze", {
-          method: "POST",
-          headers: agentHeaders(settings.table),
-          body: JSON.stringify({ headers: table.headers, rows }),
-        }),
+        await loggedFetch(
+          "/api/table/analyze",
+          {
+            method: "POST",
+            headers: agentHeaders(settings.table),
+            body: JSON.stringify({ headers: table.headers, rows }),
+          },
+          {
+            area: "Excel",
+            action: "Анализ структуры таблицы",
+            details: { columnCount: table.headers.length, sampleCount: rows.length },
+          },
+        ),
       );
       // Compute categoricals client-side from ALL rows (no model needed)
       const categoricals: Record<number, string[]> = {};
@@ -310,6 +320,7 @@ export function ExcelTab({
       setInsertRow(findInsertRow(table, result.mapping));
       toast.success("Структура таблицы определена");
     } catch (error) {
+      logAppError("Excel", error, { action: "Анализ структуры таблицы", columnCount: table.headers.length });
       toast.error(error instanceof Error ? error.message : "Не удалось проанализировать таблицу");
     } finally {
       setBusy(null);
@@ -339,11 +350,19 @@ export function ExcelTab({
         const batch = queue.slice(start, start + BATCH_SIZE).map(recordForApi);
         try {
           const result = await readApiResponse<{ records: typeof normalized }>(
-            await fetch("/api/table/insert", {
-              method: "POST",
-              headers: agentHeaders(settings.table),
-              body: JSON.stringify({ records: batch, formats: analysis.formats, categoricals: fieldCategoricals, categoryColumns }),
-            }),
+            await loggedFetch(
+              "/api/table/insert",
+              {
+                method: "POST",
+                headers: agentHeaders(settings.table),
+                body: JSON.stringify({ records: batch, formats: analysis.formats, categoricals: fieldCategoricals, categoryColumns }),
+              },
+              {
+                area: "Excel",
+                action: "Подготовка распознанных записей",
+                details: { requestedCount: batch.length },
+              },
+            ),
           );
           normalized.push(...result.records);
         } catch (error) {
@@ -381,6 +400,7 @@ export function ExcelTab({
       onQueueConsumed();
       toast.success(`Добавлено строк: ${writtenRows.length}`);
     } catch (error) {
+      logAppError("Excel", error, { action: "Вставка распознанных записей", requestedCount: queue.length });
       toast.error(error instanceof Error ? error.message : "Не удалось вставить записи");
     } finally {
       setBusy(null);
@@ -427,19 +447,27 @@ export function ExcelTab({
         const batchGaps = gaps.filter(({ row }) => rowSet.has(row));
         tasks.push(async () => {
           const result = await readApiResponse<{ changes: CellChange[]; missing?: number; warning?: string }>(
-            await fetch("/api/table/fill-gaps", {
-              method: "POST",
-              headers: agentHeaders(settings.table),
-              body: JSON.stringify({
-                headers: table.headers,
-                rows: rowIndexes.map((row) => ({ row, values: workingTable.rows[row] })),
-                gaps: batchGaps,
-                examples,
-                formats: analysis.formats,
-                categoricals: columnCategoricals,
-                instruction: instruction.trim(),
-              }),
-            }),
+            await loggedFetch(
+              "/api/table/fill-gaps",
+              {
+                method: "POST",
+                headers: agentHeaders(settings.table),
+                body: JSON.stringify({
+                  headers: table.headers,
+                  rows: rowIndexes.map((row) => ({ row, values: workingTable.rows[row] })),
+                  gaps: batchGaps,
+                  examples,
+                  formats: analysis.formats,
+                  categoricals: columnCategoricals,
+                  instruction: instruction.trim(),
+                }),
+              },
+              {
+                area: "Excel",
+                action: "Заполнение пропусков",
+                details: { requestedCount: batchGaps.length },
+              },
+            ),
           );
           if (result.warning) batchWarnings.push(result.warning);
           else if (result.missing) batchWarnings.push(`Не заполнено ячеек: ${result.missing}.`);
@@ -473,6 +501,7 @@ export function ExcelTab({
       setNotice(`В новых строках сгенерировано значений: ${applied.applied.length}. При скачивании строки будут отмечены как синтетические.`);
       toast.success(`Заполнено ячеек: ${applied.applied.length}`);
     } catch (error) {
+      logAppError("Excel", error, { action: "Заполнение пропусков", requestedCount: gaps.length });
       toast.error(error instanceof Error ? error.message : "Не удалось заполнить пропуски");
     } finally {
       setBusy(null);
@@ -505,20 +534,28 @@ export function ExcelTab({
       );
       const startIndex = insertRow ?? findInsertRow(table, analysis.mapping);
       const result = await readApiResponse<{ rows: string[][]; warning?: string }>(
-        await fetch("/api/table/generate", {
-          method: "POST",
-          headers: agentHeaders(settings.table),
-          body: JSON.stringify({
-            count,
-            headers: table.headers,
-            examples,
-            formats: analysis.formats,
-            categoricals,
-            fixedValues,
-            instruction: generationInstruction.trim(),
-            sequenceStart: startIndex,
-          }),
-        }),
+        await loggedFetch(
+          "/api/table/generate",
+          {
+            method: "POST",
+            headers: agentHeaders(settings.table),
+            body: JSON.stringify({
+              count,
+              headers: table.headers,
+              examples,
+              formats: analysis.formats,
+              categoricals,
+              fixedValues,
+              instruction: generationInstruction.trim(),
+              sequenceStart: startIndex,
+            }),
+          },
+          {
+            area: "Генератор",
+            action: "Создание синтетических строк",
+            details: { requestedCount: count, columnCount: table.headers.length },
+          },
+        ),
       );
 
       const merged = mergeGeneratedRowsAt(table, result.rows, startIndex);
@@ -538,6 +575,7 @@ export function ExcelTab({
       toast.success(`Создано тестовых строк: ${merged.writtenRows.length}`);
       if (result.warning) toast.warning(result.warning);
     } catch (error) {
+      logAppError("Генератор", error, { action: "Создание синтетических строк", requestedCount: count });
       toast.error(error instanceof Error ? error.message : "Не удалось создать тестовые строки");
     } finally {
       setBusy(null);
