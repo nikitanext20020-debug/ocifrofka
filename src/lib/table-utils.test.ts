@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendRecords, applyCellChanges, applyFixedColumnValues, applyRecordCategories, findGapCells, findInsertRow, isEmptyCell, markSyntheticRowsForExport, mergeGeneratedRowsAt, mergeRecordsAt, normalizeTable, recordsToCsv, splitFullName } from "@/lib/table-utils";
+import { appendRecords, applyCellChanges, applyFixedColumnValues, applyRecordCategories, findGapCells, findInsertRow, isEmptyCell, markSyntheticRowsForExport, mergeGeneratedRowsAt, mergeRecordsAt, normalizePhone, normalizeTable, recordForApi, recordsToCsv, splitFullName } from "@/lib/table-utils";
 import type { ColumnMapping, ExtractedRecord } from "@/lib/types";
 
 describe("normalizeTable", () => {
@@ -37,6 +37,13 @@ describe("isEmptyCell", () => {
     expect(isEmptyCell("#ERROR!")).toBe(true);
     expect(isEmptyCell("#REF!")).toBe(true);
     expect(isEmptyCell("обычный текст")).toBe(false);
+  });
+});
+
+describe("normalizePhone", () => {
+  it("removes plus signs before values reach the spreadsheet", () => {
+    expect(normalizePhone("+7(916)111-22-33")).toBe("7(916)111-22-33");
+    expect(normalizePhone("7(909)908-24-02")).toBe("7(909)908-24-02");
   });
 });
 
@@ -150,6 +157,23 @@ describe("appendRecords", () => {
       { topic: null, full_name: 1, last_name: null, first_name: null, middle_name: null, birth_date: null, address: null, phone: 2 },
     );
     expect(result.rows[1]).toEqual(["", "Иванов Иван", "8999"]);
+  });
+});
+
+describe("recordForApi", () => {
+  it("normalizes the phone sent for table insertion", () => {
+    const record = {
+      id: "1",
+      sourceName: "doc.jpg",
+      thumbnail: "",
+      topic: "Тема",
+      full_name: "Иванов Иван",
+      birth_date: "01.01.1990",
+      address: "Москва",
+      phone: "+7(916)111-22-33",
+      confidence_notes: "",
+    };
+    expect(recordForApi(record).phone).toBe("7(916)111-22-33");
   });
 });
 
