@@ -1,20 +1,31 @@
 import { describe, expect, it } from "vitest";
-import { parseRecognitionSession } from "@/lib/recognition-session";
+import { compactRecordsForStorage, parseRecognitionSession } from "@/lib/recognition-session";
+
+const record = {
+  id: "record-id",
+  topic: "Благоустройство",
+  full_name: "Иванов Иван Иванович",
+  birth_date: "01.01.1990",
+  address: "Ногинск",
+  phone: "79990000000",
+  confidence_notes: "",
+  sourceName: "page-1.jpg",
+  thumbnail: "data:image/jpeg;base64,AAAA",
+};
+
+describe("compactRecordsForStorage", () => {
+  it("omits thumbnails without changing records kept in memory", () => {
+    const compacted = compactRecordsForStorage([record]);
+
+    expect(compacted[0]).toEqual({ ...record, thumbnail: "" });
+    expect(record.thumbnail).toBe("data:image/jpeg;base64,AAAA");
+  });
+});
 
 describe("parseRecognitionSession", () => {
   it("imports a previously exported recognition session and regenerates ids", () => {
     const records = parseRecognitionSession([
-      {
-        id: "old-id",
-        topic: "Благоустройство",
-        full_name: "Иванов Иван Иванович",
-        birth_date: "01.01.1990",
-        address: "Ногинск",
-        phone: "79990000000",
-        confidence_notes: "",
-        sourceName: "page-1.jpg",
-        thumbnail: "data:image/jpeg;base64,AAAA",
-      },
+      { ...record, id: "old-id" },
     ], () => "new-id");
 
     expect(records).toEqual([{

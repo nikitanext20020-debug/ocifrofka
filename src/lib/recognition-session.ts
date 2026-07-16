@@ -10,6 +10,12 @@ const importedRecordSchema = extractedRecordResponseSchema.extend({
 
 const importedSessionSchema = z.array(importedRecordSchema).min(1).max(10_000);
 
+export function compactRecordsForStorage(records: ExtractedRecord[]) {
+  return records.map((record) => (
+    record.thumbnail ? { ...record, thumbnail: "" } : record
+  ));
+}
+
 export function parseRecognitionSession(
   input: unknown,
   createId: () => string,
