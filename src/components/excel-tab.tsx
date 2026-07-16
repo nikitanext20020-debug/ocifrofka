@@ -36,6 +36,7 @@ import {
   type CellMarks,
   type ColumnMapping,
   type ExtractedRecord,
+  type InsertProgress,
   type MappableField,
   type NamePartField,
   type RecordField,
@@ -57,6 +58,15 @@ const DEFAULT_GENERATION_INSTRUCTION = `Используй только напр
 Пиши как обычные жители, а не как пресс-служба. Не начинай с «Нельзя», «Почему», «Лучше», «Нам бы», «Если можно», «В нашем», «У нас в», «Просим», «Очень просим», «Нужно» или «Необходимо». Не штампуй начала с «В» и названия населённого пункта. «Хотелось бы» и «Очень ждут» допустимы не более 1–2 раз во всей подборке.
 Не начинай каждую строку с повелительного глагола. Чередуй конструкции: факт и решение; последствие и просьба; кто сталкивается с проблемой и что изменить; когда возникает проблема и какое улучшение поможет; просьба и конкретная причина. Не копируй соседний текст, меняя только улицу или город. Все обращения должны отличаться по началу, ритму и формулировкам.
 В колонке вовлечённости в деятельность Партии выбери «Иное». Остальные значения выбирай по смыслу.`;
+
+function progressFromFileName(fileName: string): InsertProgress | null {
+  const match = fileName.match(/-строки-(\d+)-(\d+)(?:\.[^.]+)?$/i);
+  if (!match) return null;
+  const startRow = Number(match[1]);
+  const endRow = Number(match[2]);
+  if (!Number.isInteger(startRow) || !Number.isInteger(endRow) || endRow < startRow) return null;
+  return { startRow, endRow, count: endRow - startRow + 1 };
+}
 
 function normalizedHeader(value: string) {
   return value.toLocaleLowerCase("ru-RU").replaceAll("ё", "е").replace(/[^a-zа-я0-9]+/gi, " ").trim();
@@ -115,6 +125,7 @@ export function ExcelTab({
   const [newRows, setNewRows] = useState<number[]>([]);
   const [syntheticRows, setSyntheticRows] = useState<number[]>([]);
   const [categoricalDefaults, setCategoricalDefaults] = useState<Record<number, string>>({});
+  const [insertProgress, setInsertProgress] = useState<InsertProgress | null>(null);
   const [history, setHistory] = useState<TableSnapshot[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [instruction, setInstruction] = useState("");
@@ -174,6 +185,7 @@ export function ExcelTab({
         syntheticRows: [...syntheticRows],
         categoricalDefaults: { ...categoricalDefaults },
         notice,
+        insertProgress,
       },
     ]);
   };
@@ -217,6 +229,7 @@ export function ExcelTab({
       setNewRows([]);
       setSyntheticRows([]);
       setCategoricalDefaults({});
+      setInsertProgress(progressFromFileName(file.name));
       setHistory([]);
       setNotice(null);
       setTablePage(0);
@@ -244,7 +257,10 @@ export function ExcelTab({
       );
     }
     const baseName = workbook.fileName.replace(/\.(xlsx|xls|csv)$/i, "");
-    XLSX.writeFile(output, `${baseName}-обработано.xlsx`);
+    const progressSuffix = insertProgress
+      ? `-строки-${insertProgress.startRow}-${insertProgress.endRow}`
+      : "";
+    XLSX.writeFile(output, `${baseName}-обработано${progressSuffix}.xlsx`);
   };
 
   const analyze = async () => {
@@ -332,12 +348,14 @@ export function ExcelTab({
       const fixed = applyFixedColumnValues(categorized.rows, writtenRows, categoricalDefaults);
       replaceActiveRows(fixed.rows);
       setNewRows(writtenRows);
+      setInsertRow(startIndex + writtenRows.length);
       setMarks({});
 
       if (writtenRows.length > 0) {
         showTablePage(Math.floor(writtenRows[0] / TABLE_PAGE_SIZE));
         const startExcel = writtenRows[0] + 2;
         const endExcel = writtenRows[writtenRows.length - 1] + 2;
+        setInsertProgress({ startRow: startExcel, endRow: endExcel, count: writtenRows.length });
         const skipped = normalized.length - writtenRows.length;
         let noticeText = `Добавлены строки ${startExcel}–${endExcel}`;
         if (skipped > 0) noticeText += ` · ${skipped} не вошли (конец листа)`;
@@ -508,6 +526,7 @@ export function ExcelTab({
     setNewRows(snapshot.newRows);
     setSyntheticRows(snapshot.syntheticRows);
     setCategoricalDefaults(snapshot.categoricalDefaults);
+    setInsertProgress(snapshot.insertProgress);
     setNotice(snapshot.notice);
     setHistory((current) => current.slice(0, -1));
     toast.success("Последнее действие отменено");
@@ -563,7 +582,7 @@ export function ExcelTab({
                     value={workbook.activeSheet}
                     onChange={(event) => {
                       setWorkbook({ ...workbook, activeSheet: event.target.value });
-                      setAnalysis(null); setInsertRow(null); setMarks({}); setNewRows([]); setSyntheticRows([]); setCategoricalDefaults({}); setHistory([]); setNotice(null);
+                      setAnalysis(null); setInsertRow(null); setMarks({}); setNewRows([]); setSyntheticRows([]); setCategoricalDefaults({}); setInsertProgress(null); setHistory([]); setNotice(null);
                       setTablePage(0);
                     }}
                   >
@@ -671,6 +690,12 @@ export function ExcelTab({
               </div>
               {!analysis && <p className="mt-3 text-sm text-[#806b32]">Сначала проанализируйте таблицу, чтобы определить колонки и форматы.</p>}
               {notice && <div className="mt-4 rounded-md border border-[#b9dfd3] bg-[#edf8f4] px-4 py-3 text-sm font-medium text-[#1e6958]">{notice}</div>}
+              {insertProgress && (
+                <div className="mt-3 rounded-md border border-[#c8d9ef] bg-[#f1f6fd] px-4 py-3 text-sm text-[#31567e]">
+                  <strong>Последняя партия:</strong> строки {insertProgress.startRow}–{insertProgress.endRow} ({insertProgress.count} записей).
+                  <span className="ml-1">Следующую партию начинайте со строки {insertProgress.endRow + 1}.</span>
+                </div>
+              )}
             </Card>
           )}
 

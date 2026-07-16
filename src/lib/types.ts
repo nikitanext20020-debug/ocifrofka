@@ -72,6 +72,12 @@ export type CellChange = {
 export type CellMark = "generated" | "custom";
 export type CellMarks = Record<string, CellMark>;
 
+export type InsertProgress = {
+  startRow: number;
+  endRow: number;
+  count: number;
+};
+
 export type TableSnapshot = {
   workbook: WorkbookData;
   marks: CellMarks;
@@ -79,6 +85,7 @@ export type TableSnapshot = {
   syntheticRows: number[];
   categoricalDefaults: Record<number, string>;
   notice: string | null;
+  insertProgress: InsertProgress | null;
 };
 
 export const FIELD_LABELS: Record<RecordField, string> = {
