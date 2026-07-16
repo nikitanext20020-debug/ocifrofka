@@ -45,18 +45,28 @@ export const tableAnalysisSchema = z.object({
   }),
 });
 
-export const normalizedRecordsSchema = z.object({
-  records: z.array(
-    z.object({
-      topic: recordValueSchema,
-      full_name: recordValueSchema,
-      birth_date: recordValueSchema,
-      address: recordValueSchema,
-      phone: recordValueSchema,
-      categories: z.record(z.string(), recordValueSchema).optional().default({}),
-    }),
-  ),
+const normalizedRecordSchema = z.object({
+  topic: recordValueSchema,
+  full_name: recordValueSchema,
+  birth_date: recordValueSchema,
+  address: recordValueSchema,
+  phone: recordValueSchema,
+  categories: z.preprocess(
+    (value) => value && typeof value === "object" && !Array.isArray(value) ? value : {},
+    z.record(z.string(), recordValueSchema),
+  ).default({}),
 });
+
+export const normalizedRecordsSchema = z.preprocess(
+  (value) => {
+    if (Array.isArray(value)) return { records: value };
+    if (value && typeof value === "object" && "data" in value && Array.isArray(value.data)) {
+      return { ...value, records: value.data };
+    }
+    return value;
+  },
+  z.object({ records: z.array(normalizedRecordSchema) }),
+);
 
 export const cellChangeSchema = z.object({
   row: z.number().int().nonnegative(),
