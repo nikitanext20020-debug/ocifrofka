@@ -15,11 +15,13 @@ type AgentRequestConfig = {
 
 export class ModelApiError extends Error {
   status: number;
+  retryable: boolean;
 
-  constructor(message: string, status = 500) {
+  constructor(message: string, status = 500, retryable = false) {
     super(message);
     this.name = "ModelApiError";
     this.status = status;
+    this.retryable = retryable;
   }
 }
 
@@ -101,21 +103,67 @@ function providerError(status: number, details?: string) {
   return details ? `Ошибка провайдера: ${details}` : "Провайдер не смог обработать запрос.";
 }
 
-export function normalizeAssistantContent(content: unknown) {
+export function normalizeAssistantContent(content: unknown): string {
   if (typeof content === "string") return content.trim();
   if (Array.isArray(content)) {
     return content
       .map((part) => {
         if (typeof part === "string") return part;
         if (!part || typeof part !== "object") return "";
-        const text = "text" in part ? part.text : "content" in part ? part.content : "";
-        return typeof text === "string" ? text : "";
+        const text = "text" in part
+          ? part.text
+          : "content" in part
+            ? part.content
+            : "value" in part
+              ? part.value
+              : "";
+        return normalizeAssistantContent(text);
       })
       .filter(Boolean)
       .join("\n")
       .trim();
   }
   if (content && typeof content === "object") return JSON.stringify(content);
+  return "";
+}
+
+type CompletionPayload = {
+  choices?: Array<{
+    message?: {
+      content?: unknown;
+      reasoning_content?: unknown;
+      reasoning?: unknown;
+      analysis?: unknown;
+    };
+    text?: unknown;
+    finish_reason?: unknown;
+  }>;
+  output_text?: unknown;
+  output?: unknown;
+  content?: unknown;
+  error?: { message?: string } | string;
+};
+
+/** Extracts text from common OpenAI-compatible and Responses-style envelopes. */
+export function extractCompletionText(payload: unknown) {
+  if (!payload || typeof payload !== "object") return "";
+  const value = payload as CompletionPayload;
+  const choice = value.choices?.[0];
+  const message = choice?.message;
+  const candidates = [
+    message?.content,
+    choice?.text,
+    value.output_text,
+    value.output,
+    value.content,
+    message?.reasoning_content,
+    message?.reasoning,
+    message?.analysis,
+  ];
+  for (const candidate of candidates) {
+    const content = normalizeAssistantContent(candidate);
+    if (content) return content;
+  }
   return "";
 }
 
@@ -181,30 +229,30 @@ async function requestCompletion(
         messages,
         temperature: jsonMode ? 0 : 0.2,
         ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
+        ...(jsonMode && config.model.toLocaleLowerCase().includes("deepseek")
+          ? { thinking: { type: "disabled" } }
+          : {}),
       }),
       signal: controller.signal,
       redirect: "error",
       cache: "no-store",
     });
-    const payload = (await response.json().catch(() => null)) as {
-      choices?: Array<{
-        message?: {
-          content?: unknown;
-          reasoning_content?: unknown;
-        };
-      }>;
-      error?: { message?: string } | string;
-    } | null;
+    const payload = (await response.json().catch(() => null)) as CompletionPayload | null;
     if (!response.ok) {
       const details =
         typeof payload?.error === "string" ? payload.error : payload?.error?.message;
       throw new ModelApiError(providerError(response.status, details), response.status);
     }
-    const message = payload?.choices?.[0]?.message;
-    const content = normalizeAssistantContent(message?.content);
-    const reasoning = normalizeAssistantContent(message?.reasoning_content);
-    const result = content || reasoning;
-    if (!result) throw new ModelApiError("Модель вернула пустой ответ.", 502);
+    const result = extractCompletionText(payload);
+    if (!result) {
+      const finishReason = payload?.choices?.[0]?.finish_reason;
+      const message = finishReason === "length"
+        ? "Ответ модели оборвался по лимиту токенов."
+        : payload
+          ? "Модель вернула пустой ответ."
+          : "Провайдер вернул ответ в неизвестном формате.";
+      throw new ModelApiError(message, 502, true);
+    }
     return result;
   } catch (error) {
     if (error instanceof ModelApiError) throw error;
@@ -231,25 +279,31 @@ export async function callStructured<T>(options: {
           ? options.messages
           : [
               ...options.messages,
-              { role: "assistant", content: previousContent.slice(0, 12_000) },
+              ...(previousContent
+                ? [{ role: "assistant" as const, content: previousContent.slice(0, 12_000) }]
+                : []),
               {
                 role: "user",
-                content:
-                  "Исправь предыдущий ответ. Верни только валидный JSON строго по заданной структуре, без Markdown и пояснений.",
+                content: previousContent
+                  ? "Исправь предыдущий ответ. Верни только валидный JSON строго по заданной структуре, без Markdown и пояснений."
+                  : "Предыдущий ответ был пустым. Верни только валидный JSON строго по заданной структуре, без Markdown и пояснений.",
               },
             ];
       previousContent = await requestCompletion(options.config, messages, true);
       return options.schema.parse(parseJsonContent(previousContent));
     } catch (error) {
-      if (error instanceof ModelApiError) throw error;
+      if (error instanceof ModelApiError && !error.retryable) throw error;
       lastError = error;
     }
+  }
+  if (lastError instanceof ModelApiError) {
+    throw new ModelApiError(`${lastError.message} Не удалось получить данные после трёх попыток.`, lastError.status);
   }
   const reason =
     lastError instanceof SyntaxError
       ? "ответ не содержит корректный JSON"
       : "поля ответа не соответствуют требуемой структуре";
-  throw new ModelApiError(`Модель дважды вернула неверный формат: ${reason}.`, 502);
+  throw new ModelApiError(`Модель трижды вернула неверный формат: ${reason}.`, 502);
 }
 
 export async function testConnection(config: AgentRequestConfig) {

@@ -1,4 +1,4 @@
-import type { ColumnMapping, MappableField } from "@/lib/types";
+import type { ColumnMapping, MappableField, RecordField } from "@/lib/types";
 
 const HEADER_ALIASES: Record<MappableField, RegExp[]> = {
   topic: [
@@ -17,12 +17,12 @@ const HEADER_ALIASES: Record<MappableField, RegExp[]> = {
   middle_name: [/^отчество(?: заявителя)?$/],
   birth_date: [
     /^дата$/,
-    /^дата рождения$/,
+    /^дата рождения(?: в формате.*)?$/,
     /^дата рожд$/,
   ],
   address: [
     /^адрес$/,
-    /^адрес проживания$/,
+    /^адрес проживания(?: в формате.*)?$/,
     /^место жительства$/,
     /^адрес регистрации$/,
   ],
@@ -30,19 +30,19 @@ const HEADER_ALIASES: Record<MappableField, RegExp[]> = {
     /^телефон$/,
     /^номер телефона$/,
     /^мобильный телефон$/,
-    /^номер мобильного телефона$/,
+    /^номер мобильного телефона(?: строго)?(?: в формате.*)?$/,
     /^контактный телефон$/,
   ],
 };
 
 const DESCRIPTIVE_HEADER_ALIASES = [
   /^муниципалитет$/,
-  /^адрес проживания$/,
+  /^адрес проживания(?: в формате.*)?$/,
   /^фамилия$/,
   /^имя$/,
   /^отчество$/,
-  /^дата(?: рождения)?$/,
-  /^номер мобильного телефона$/,
+  /^дата(?: рождения)?(?: в формате.*)?$/,
+  /^номер мобильного телефона(?: строго)?(?: в формате.*)?$/,
   /^e mail$/,
   /^вовлеченность в деятельность партии(?: единая россия)?$/,
   /^тематика (?:предложения|обращения)$/,
@@ -141,4 +141,62 @@ export function refineColumnMapping(
   }
 
   return mapping;
+}
+
+function emptyMapping(): ColumnMapping {
+  return {
+    topic: null,
+    full_name: null,
+    last_name: null,
+    first_name: null,
+    middle_name: null,
+    birth_date: null,
+    address: null,
+    phone: null,
+  };
+}
+
+function hasCompleteCoreMapping(mapping: ColumnMapping) {
+  const hasName = mapping.full_name !== null ||
+    (mapping.last_name !== null && mapping.first_name !== null);
+  return hasName && mapping.topic !== null && mapping.birth_date !== null &&
+    mapping.address !== null && mapping.phone !== null;
+}
+
+function sampleValue(rows: unknown[][], column: number | null) {
+  if (column === null) return "";
+  for (const row of rows) {
+    const value = String(row[column] ?? "").trim();
+    if (value && value !== "-") return value;
+  }
+  return "";
+}
+
+function localFormats(mapping: ColumnMapping, rows: unknown[][]): Record<RecordField, string> {
+  const birthDate = sampleValue(rows, mapping.birth_date);
+  const phone = sampleValue(rows, mapping.phone);
+  const birthDateFormat = /^\d{1,2}\.\d{1,2}\.\d{4}$/.test(birthDate)
+    ? "ДД.ММ.ГГГГ"
+    : /^\d{4}-\d{1,2}-\d{1,2}$/.test(birthDate)
+      ? "ГГГГ-ММ-ДД"
+      : "дата как в исходной таблице";
+  const phoneFormat = /^\+?7\(\d{3}\)\d{3}-\d{2}-\d{2}$/.test(phone)
+    ? "7(999)999-99-99 без знака +"
+    : "телефон как в исходной таблице, без знака +";
+  return {
+    topic: "текст обращения",
+    full_name: mapping.full_name !== null
+      ? "Фамилия Имя Отчество в одной колонке"
+      : "фамилия, имя и отчество в отдельных колонках",
+    birth_date: birthDateFormat,
+    address: "текстовый адрес",
+    phone: phoneFormat,
+  };
+}
+
+/** Avoids a model request when descriptive headers fully identify the table. */
+export function analyzeTableDeterministically(headers: string[], rows: unknown[][]) {
+  const mapping = refineColumnMapping(headers, rows, emptyMapping());
+  if (!hasCompleteCoreMapping(mapping)) return null;
+  return { mapping, formats: localFormats(mapping, rows) };
 }

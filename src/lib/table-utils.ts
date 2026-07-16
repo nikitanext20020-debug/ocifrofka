@@ -130,7 +130,7 @@ export function applyCellChanges(
       change.column < 0 ||
       change.column >= (next[change.row]?.length ?? 0) ||
       (allowed && !explicitlyAllowed) ||
-      (emptyOnly && !isEmptyCell(next[change.row][change.column]) && !explicitlyAllowed)
+      (emptyOnly && !isEmptyCell(next[change.row][change.column]))
     ) {
       continue;
     }
