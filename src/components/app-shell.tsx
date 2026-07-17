@@ -28,7 +28,13 @@ const TABS = [
 
 export function AppShell() {
   const [tab, setTab] = useState<Tab>("recognition");
-  const [settings, setSettings] = useLocalStorage<AppSettings>("digitizer-settings", DEFAULT_SETTINGS);
+  const [settings, setSettings] = useLocalStorage<AppSettings>(
+    "digitizer-settings",
+    DEFAULT_SETTINGS,
+    undefined,
+    1,
+    normalizeSettings,
+  );
   const [records, setRecords] = useLocalStorage<ExtractedRecord[]>(
     "digitizer-session",
     EMPTY_RECORDS,
@@ -42,8 +48,13 @@ export function AppShell() {
 
   useEffect(() => {
     const handleQuota = () => toast.error("Хранилище браузера заполнено. Экспортируйте сессию и удалите часть записей.");
+    const handleParseError = () => toast.error("Не удалось прочитать настройки: файл поврежден. Создана резервная копия, настройки сброшены.");
     window.addEventListener("storage-quota-error", handleQuota);
-    return () => window.removeEventListener("storage-quota-error", handleQuota);
+    window.addEventListener("storage-parse-error", handleParseError);
+    return () => {
+      window.removeEventListener("storage-quota-error", handleQuota);
+      window.removeEventListener("storage-parse-error", handleParseError);
+    };
   }, []);
 
   useEffect(() => {

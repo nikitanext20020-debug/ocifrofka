@@ -35,12 +35,24 @@ export type VisionAgent = AgentConfig & {
   name: string;
 };
 
+export type TableAgent = AgentConfig & {
+  id: string;
+  name: string;
+};
+
 export type AppSettings = {
   visionAgents: VisionAgent[];
   activeVisionAgentId: string;
+  tableAgents: TableAgent[];
+  activeTableAgentId: string;
   parallelRequests: number;
-  table: AgentConfig;
+  table?: AgentConfig;
   extractionPrompt: string;
+  agentTimeout: number;
+  pingHistory?: Record<
+    string,
+    { latencyMs: number; timestamp: number; error?: string }
+  >;
 };
 
 export type TableData = {
@@ -57,10 +69,20 @@ export type WorkbookData = {
 
 export type ColumnMapping = Record<MappableField, number | null>;
 
+export type MappingConflict = {
+  field: MappableField;
+  /** Column that the header name pointed to. */
+  headerColumn: number;
+  /** Column that the actual data matches. */
+  dataColumn: number;
+};
+
 export type TableAnalysis = {
   mapping: ColumnMapping;
   formats: Record<RecordField, string>;
   categoricals: Record<number, string[]>;
+  /** Columns where the header name and the data content disagreed. */
+  conflicts?: MappingConflict[];
 };
 
 export type CellChange = {
@@ -69,7 +91,7 @@ export type CellChange = {
   value: string;
 };
 
-export type CellMark = "generated" | "custom";
+export type CellMark = "generated" | "custom" | "phone-invalid";
 export type CellMarks = Record<string, CellMark>;
 
 export type InsertProgress = {

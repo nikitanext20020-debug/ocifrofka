@@ -15,7 +15,9 @@ describe("table generator route", () => {
     const rows = Array.from({ length: 5 }, (_, index) => ({
       0: `Почините объект номер ${index + 1}. Жителям станет удобнее.`,
     }));
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+    // Use mockImplementation (not mockResolvedValue) so each fetch call gets a
+    // fresh Response instance — Response.json() can only be consumed once per object.
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({
       choices: [{ message: { content: JSON.stringify({ rows }) } }],
     }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
@@ -44,8 +46,47 @@ describe("table generator route", () => {
       rows: rows.map((row) => [row[0]]),
       warning: expect.stringContaining("повелительного глагола"),
     });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // The route detects quality issues (all texts start with an imperative verb)
+    // and performs a retry, so the provider is called twice.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     const providerRequest = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
     expect(providerRequest.temperature).toBe(0.7);
+  });
+
+  it("flags quality warning if a generated row is highly similar to one of the forbiddenTexts", async () => {
+    vi.spyOn(dns, "lookup").mockResolvedValue([
+      { address: "93.184.216.34", family: 4 },
+    ] as unknown as Awaited<ReturnType<typeof dns.lookup>>);
+
+    // The mock model returns a row that matches the forbidden text "Почините объект номер один"
+    const rows = [{ 0: "Почините объект номер один. Жителям станет удобнее." }];
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({ rows }) } }],
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await POST(new Request("http://localhost/api/table/generate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-agent-base-url": "https://api.example.com/v1",
+        "x-agent-api-key": "test",
+        "x-agent-model": "test-model",
+      },
+      body: JSON.stringify({
+        count: 1,
+        headers: ["Текст наказа"],
+        examples: [],
+        formats: {},
+        categoricals: {},
+        fixedValues: {},
+        instruction: "",
+        forbiddenTexts: ["Почините объект номер один. Нам станет удобнее."],
+      }),
+    }));
+
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload.warning).toContain("запрещенное");
   });
 });

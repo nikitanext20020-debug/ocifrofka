@@ -40,7 +40,8 @@ export async function POST(request: Request) {
         { role: "user", content: JSON.stringify(body) },
       ],
     });
-    result.mapping = refineColumnMapping(body.headers, body.rows, result.mapping);
+    const { mapping: refinedMapping } = refineColumnMapping(body.headers, body.rows, result.mapping);
+    result.mapping = refinedMapping;
     const hasSeparateNameColumns = result.mapping.last_name !== null ||
       result.mapping.first_name !== null || result.mapping.middle_name !== null;
     if (hasSeparateNameColumns) result.mapping.full_name = null;

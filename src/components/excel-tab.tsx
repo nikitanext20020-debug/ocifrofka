@@ -39,14 +39,19 @@ import {
   type ExtractedRecord,
   type InsertProgress,
   type MappableField,
+  type MappingConflict,
   type NamePartField,
   type RecordField,
   type TableAnalysis,
   type TableSnapshot,
   type WorkbookData,
 } from "@/lib/types";
-import { agentHeaders, clone, cn, readApiResponse } from "@/lib/utils";
+import { clone, cn, readApiResponse } from "@/lib/utils";
+
 import { loggedFetch, logAppError } from "@/lib/app-logs";
+import { fetchWithFailover } from "@/lib/recognition-queue";
+import { useLocalStorage } from "@/lib/use-local-storage";
+import { sampleColumnValues } from "@/lib/column-mapping";
 import { Button, Card, EmptyState, SectionTitle } from "@/components/ui";
 
 const BATCH_SIZE = 30;
@@ -134,8 +139,8 @@ export function ExcelTab({
   const [insertProgress, setInsertProgress] = useState<InsertProgress | null>(null);
   const [history, setHistory] = useState<TableSnapshot[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
-  const [instruction, setInstruction] = useState("");
-  const [generationInstruction, setGenerationInstruction] = useState(DEFAULT_GENERATION_INSTRUCTION);
+  const [instruction, setInstruction] = useLocalStorage("digitizer-fill-gaps-instruction", "");
+  const [generationInstruction, setGenerationInstruction] = useLocalStorage("digitizer-generation-instruction", DEFAULT_GENERATION_INSTRUCTION);
   const [generationCount, setGenerationCount] = useState(10);
   const [busy, setBusy] = useState<BusyAction>(null);
   const [tablePage, setTablePage] = useState(0);
@@ -214,12 +219,14 @@ export function ExcelTab({
       const parsed = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
       const sheets = Object.fromEntries(
         parsed.SheetNames.map((name) => {
-          const matrix = XLSX.utils.sheet_to_json<unknown[]>(parsed.Sheets[name], {
+          const ws = parsed.Sheets[name];
+          const matrix = XLSX.utils.sheet_to_json<unknown[]>(ws, {
             header: 1,
             raw: false,
             defval: "",
           });
-          return [name, normalizeTable(matrix)];
+          // Pass merge ranges so merged header cells are expanded correctly.
+          return [name, normalizeTable(matrix, (ws as Record<string, unknown>)["!merges"] as Parameters<typeof normalizeTable>[1])];
         }),
       );
       const next = {
@@ -257,9 +264,28 @@ export function ExcelTab({
       const sheet = sheetName === workbook.activeSheet
         ? markSyntheticRowsForExport(sourceSheet, syntheticRows)
         : sourceSheet;
+      const ws = XLSX.utils.aoa_to_sheet([sheet.headers, ...sheet.rows]);
+      if (sheetName === workbook.activeSheet && analysis && analysis.mapping.phone !== null) {
+        const phoneCol = analysis.mapping.phone;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const utils = XLSX.utils as any;
+        for (let r = 1; r <= sheet.rows.length; r++) {
+          const cellRef = utils.encode_cell({ r, c: phoneCol });
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const cell = ws[cellRef] as any;
+          if (cell) {
+            cell.t = "s";
+            cell.z = "@";
+            const val = cell.v;
+            if (val !== undefined && val !== null) {
+              cell.v = String(val);
+            }
+          }
+        }
+      }
       XLSX.utils.book_append_sheet(
         output,
-        XLSX.utils.aoa_to_sheet([sheet.headers, ...sheet.rows]),
+        ws,
         sheetName,
       );
     }
@@ -277,21 +303,22 @@ export function ExcelTab({
       const rows = table.rows
         .filter((row) => row.some((cell) => String(cell ?? "").trim()))
         .slice(0, 20);
-      const result = await readApiResponse<{ mapping: ColumnMapping; formats: Record<RecordField, string> }>(
-        await loggedFetch(
-          "/api/table/analyze",
-          {
-            method: "POST",
-            headers: agentHeaders(settings.table),
-            body: JSON.stringify({ headers: table.headers, rows }),
-          },
-          {
-            area: "Excel",
-            action: "Анализ структуры таблицы",
-            details: { columnCount: table.headers.length, sampleCount: rows.length },
-          },
-        ),
-      );
+      const response = await fetchWithFailover({
+        agents: settings.tableAgents,
+        activeAgentId: settings.activeTableAgentId,
+        timeoutSeconds: settings.agentTimeout ?? 60,
+        path: "/api/table/analyze",
+        method: "POST",
+        body: JSON.stringify({ headers: table.headers, rows }),
+        area: "Excel",
+        action: "Анализ структуры таблицы",
+        fetcher: (input, init) => loggedFetch(input, init, {
+          area: "Excel",
+          action: "Анализ структуры таблицы",
+          details: { columnCount: table.headers.length, sampleCount: rows.length },
+        }),
+      });
+      const result = await readApiResponse<{ mapping: ColumnMapping; formats: Record<RecordField, string>; conflicts?: MappingConflict[] }>(response);
       // Compute categoricals client-side from ALL rows (no model needed)
       const categoricals: Record<number, string[]> = {};
       table.headers.forEach((header, colIndex) => {
@@ -305,7 +332,7 @@ export function ExcelTab({
           categoricals[colIndex] = [...valueSet].sort();
         }
       });
-      const fullResult: TableAnalysis = { ...result, categoricals };
+      const fullResult: TableAnalysis = { ...result, categoricals, conflicts: result.conflicts };
       setAnalysis(fullResult);
       const suggestedDefaults: Record<number, string> = {};
       for (const [rawColumn, values] of Object.entries(categoricals)) {
@@ -349,21 +376,22 @@ export function ExcelTab({
       for (let start = 0; start < queue.length; start += BATCH_SIZE) {
         const batch = queue.slice(start, start + BATCH_SIZE).map(recordForApi);
         try {
-          const result = await readApiResponse<{ records: typeof normalized }>(
-            await loggedFetch(
-              "/api/table/insert",
-              {
-                method: "POST",
-                headers: agentHeaders(settings.table),
-                body: JSON.stringify({ records: batch, formats: analysis.formats, categoricals: fieldCategoricals, categoryColumns }),
-              },
-              {
-                area: "Excel",
-                action: "Подготовка распознанных записей",
-                details: { requestedCount: batch.length },
-              },
-            ),
-          );
+          const response = await fetchWithFailover({
+            agents: settings.tableAgents,
+            activeAgentId: settings.activeTableAgentId,
+            timeoutSeconds: settings.agentTimeout ?? 60,
+            path: "/api/table/insert",
+            method: "POST",
+            body: JSON.stringify({ records: batch, formats: analysis.formats, categoricals: fieldCategoricals, categoryColumns }),
+            area: "Excel",
+            action: "Подготовка распознанных записей",
+            fetcher: (input, init) => loggedFetch(input, init, {
+              area: "Excel",
+              action: "Подготовка распознанных записей",
+              details: { requestedCount: batch.length },
+            }),
+          });
+          const result = await readApiResponse<{ records: typeof normalized }>(response);
           normalized.push(...result.records);
         } catch (error) {
           if (!isStructuredModelFormatError(error)) throw error;
@@ -427,6 +455,38 @@ export function ExcelTab({
       }
       return;
     }
+
+    const fixablePhones = gaps.filter((g) => g.phoneStatus === "fixable");
+    const invalidPhones = gaps.filter((g) => g.phoneStatus === "invalid");
+    const modelGaps = gaps.filter((g) => !g.phoneStatus);
+
+    const phoneFixChanges: CellChange[] = fixablePhones.map((g) => ({
+      row: g.row,
+      column: g.column,
+      value: g.phoneFormatted || "",
+    }));
+
+    if (!modelGaps.length) {
+      const finalGapsSet = new Set(fixablePhones.map(({ row, column }) => `${row}:${column}`));
+      const applied = applyCellChanges(workingTable.rows, phoneFixChanges, finalGapsSet);
+      pushSnapshot();
+      replaceActiveRows(applied.rows);
+
+      const nextMarks = { ...marks };
+      applied.applied.forEach((change) => {
+        nextMarks[`${change.row}:${change.column}`] = "generated";
+      });
+      invalidPhones.forEach((g) => {
+        nextMarks[`${g.row}:${g.column}`] = "phone-invalid";
+      });
+      setMarks(nextMarks);
+
+      const msg = `Исправлено форматирование: ${fixablePhones.length} номеров, требуют проверки: ${invalidPhones.length}`;
+      setNotice(msg);
+      toast.success(msg);
+      return;
+    }
+
     setBusy("gaps");
     try {
       // Build column-header-level categoricals for fill-gaps prompt
@@ -438,56 +498,51 @@ export function ExcelTab({
       const examples = workingTable.rows
         .filter((row) => Object.values(analysis.mapping).every((column) => column === null || String(row[column] ?? "").trim()))
         .slice(0, 10);
-      const groupedRows = [...new Set(gaps.map(({ row }) => row))];
+      const groupedRows = [...new Set(modelGaps.map(({ row }) => row))];
       const tasks: Array<() => Promise<CellChange[]>> = [];
       const batchWarnings: string[] = [];
       for (let start = 0; start < groupedRows.length; start += BATCH_SIZE) {
         const rowIndexes = groupedRows.slice(start, start + BATCH_SIZE);
         const rowSet = new Set(rowIndexes);
-        const batchGaps = gaps.filter(({ row }) => rowSet.has(row));
+        const batchGaps = modelGaps.filter(({ row }) => rowSet.has(row));
         tasks.push(async () => {
-          const result = await readApiResponse<{ changes: CellChange[]; missing?: number; warning?: string }>(
-            await loggedFetch(
-              "/api/table/fill-gaps",
-              {
-                method: "POST",
-                headers: agentHeaders(settings.table),
-                body: JSON.stringify({
-                  headers: table.headers,
-                  rows: rowIndexes.map((row) => ({ row, values: workingTable.rows[row] })),
-                  gaps: batchGaps,
-                  examples,
-                  formats: analysis.formats,
-                  categoricals: columnCategoricals,
-                  instruction: instruction.trim(),
-                }),
-              },
-              {
-                area: "Excel",
-                action: "Заполнение пропусков",
-                details: { requestedCount: batchGaps.length },
-              },
-            ),
-          );
+          const response = await fetchWithFailover({
+            agents: settings.tableAgents,
+            activeAgentId: settings.activeTableAgentId,
+            timeoutSeconds: settings.agentTimeout ?? 60,
+            path: "/api/table/fill-gaps",
+            method: "POST",
+            body: JSON.stringify({
+              headers: table.headers,
+              rows: rowIndexes.map((row) => ({ row, values: workingTable.rows[row] })),
+              gaps: batchGaps,
+              examples,
+              formats: analysis.formats,
+              categoricals: columnCategoricals,
+              instruction: instruction.trim(),
+            }),
+            area: "Excel",
+            action: "Заполнение пропусков",
+            fetcher: (input, init) => loggedFetch(input, init, {
+              area: "Excel",
+              action: "Заполнение пропусков",
+              details: { requestedCount: batchGaps.length },
+            }),
+          });
+          const result = await readApiResponse<{ changes: CellChange[]; missing?: number; warning?: string }>(response);
           if (result.warning) batchWarnings.push(result.warning);
           else if (result.missing) batchWarnings.push(`Не заполнено ячеек: ${result.missing}.`);
           return result.changes;
         });
       }
       const { results: changes, errors } = await runBatches(tasks);
-      const allowed = new Set(gaps.map(({ row, column }) => `${row}:${column}`));
-      // `gaps` already contains only empty cells or intentionally short topics;
-      // allow the latter to be refined while keeping every other cell protected
-      // by the explicit `allowed` set.
-      const applied = applyCellChanges(workingTable.rows, changes, allowed);
-      if (!applied.applied.length) {
-        if (fixed.applied.length) {
-          pushSnapshot();
-          replaceActiveRows(fixed.rows);
-          setNotice(`Применено фиксированных значений: ${fixed.applied.length}; остальные пропуски не заполнены`);
-          toast.warning("Фиксированные значения применены, но модель не заполнила остальные пропуски");
-          return;
-        }
+      const allChanges = [...changes, ...phoneFixChanges];
+      const allowed = new Set([
+        ...modelGaps.map(({ row, column }) => `${row}:${column}`),
+        ...fixablePhones.map(({ row, column }) => `${row}:${column}`),
+      ]);
+      const applied = applyCellChanges(workingTable.rows, allChanges, allowed);
+      if (!applied.applied.length && !fixed.applied.length && !phoneFixChanges.length) {
         throw errors[0] ?? new Error("Модель не предложила значений для пропусков");
       }
       if (errors.length) {
@@ -496,9 +551,27 @@ export function ExcelTab({
       if (batchWarnings.length) toast.warning([...new Set(batchWarnings)].join(" "));
       pushSnapshot();
       replaceActiveRows(applied.rows);
-      setMarks(Object.fromEntries(applied.applied.map(({ row, column }) => [`${row}:${column}`, "generated"] as const)));
-      setSyntheticRows((current) => [...new Set([...current, ...applied.applied.map(({ row }) => row)])]);
-      setNotice(`В новых строках сгенерировано значений: ${applied.applied.length}. При скачивании строки будут отмечены как синтетические.`);
+
+      const nextMarks = { ...marks };
+      applied.applied.forEach(({ row, column }) => {
+        nextMarks[`${row}:${column}`] = "generated";
+      });
+      invalidPhones.forEach((g) => {
+        nextMarks[`${g.row}:${g.column}`] = "phone-invalid";
+      });
+      setMarks(nextMarks);
+
+      const modelApplied = applied.applied.filter(
+        (ch) => !phoneFixChanges.some((p) => p.row === ch.row && p.column === ch.column),
+      );
+      setSyntheticRows((current) => [...new Set([...current, ...modelApplied.map(({ row }) => row)])]);
+
+      const fixCount = fixablePhones.length;
+      const invalidCount = invalidPhones.length;
+      const modelCount = modelApplied.length;
+
+      const noticeMsg = `В новых строках сгенерировано значений: ${modelCount}. Исправлено форматирование: ${fixCount} номеров, требуют проверки: ${invalidCount}.`;
+      setNotice(noticeMsg);
       toast.success(`Заполнено ячеек: ${applied.applied.length}`);
     } catch (error) {
       logAppError("Excel", error, { action: "Заполнение пропусков", requestedCount: gaps.length });
@@ -533,30 +606,36 @@ export function ExcelTab({
           .filter(([header, value]) => Boolean(header && value)),
       );
       const startIndex = insertRow ?? findInsertRow(table, analysis.mapping);
-      const result = await readApiResponse<{ rows: string[][]; warning?: string }>(
-        await loggedFetch(
-          "/api/table/generate",
-          {
-            method: "POST",
-            headers: agentHeaders(settings.table),
-            body: JSON.stringify({
-              count,
-              headers: table.headers,
-              examples,
-              formats: analysis.formats,
-              categoricals,
-              fixedValues,
-              instruction: generationInstruction.trim(),
-              sequenceStart: startIndex,
-            }),
-          },
-          {
-            area: "Генератор",
-            action: "Создание синтетических строк",
-            details: { requestedCount: count, columnCount: table.headers.length },
-          },
-        ),
-      );
+      const topicCol = analysis.mapping.topic;
+      const forbiddenTexts = topicCol !== null
+        ? table.rows.slice(-200).map((row) => String(row[topicCol] ?? "").trim()).filter(Boolean)
+        : [];
+      const response = await fetchWithFailover({
+        agents: settings.tableAgents,
+        activeAgentId: settings.activeTableAgentId,
+        timeoutSeconds: settings.agentTimeout ?? 60,
+        path: "/api/table/generate",
+        method: "POST",
+        body: JSON.stringify({
+          count,
+          headers: table.headers,
+          examples,
+          formats: analysis.formats,
+          categoricals,
+          fixedValues,
+          instruction: generationInstruction.trim(),
+          sequenceStart: startIndex,
+          forbiddenTexts,
+        }),
+        area: "Генератор",
+        action: "Создание синтетических строк",
+        fetcher: (input, init) => loggedFetch(input, init, {
+          area: "Генератор",
+          action: "Создание синтетических строк",
+          details: { requestedCount: count, columnCount: table.headers.length },
+        }),
+      });
+      const result = await readApiResponse<{ rows: string[][]; warning?: string }>(response);
 
       const merged = mergeGeneratedRowsAt(table, result.rows, startIndex);
       if (!merged.applied.length) {
@@ -674,20 +753,24 @@ export function ExcelTab({
                       return (
                       <tr className={cn("border-b border-[#e5ebe8]", newRows.includes(rowIndex) && "bg-[#e8f7ee]")} key={rowIndex}>
                         <td className="border-r border-[#e0e7e4] px-3 py-2 text-center text-xs text-[#7b8985]">{rowIndex + 2}</td>
-                        {table.headers.map((_, columnIndex) => {
+                         {table.headers.map((_, columnIndex) => {
                           const mark = marks[`${rowIndex}:${columnIndex}`];
+                          const digitsCount = (String(row[columnIndex] ?? "").replace(/\D/g, "")).length;
                           return (
                             <td
                               className={cn(
                                 "max-w-80 border-r border-[#e0e7e4] px-3 py-2 align-top text-[#293733]",
                                 mark === "generated" && "bg-[#fff0d5]",
                                 mark === "custom" && "bg-[#e8f1ff]",
+                                mark === "phone-invalid" && "bg-[#ffebe0]",
                               )}
+                              title={mark === "phone-invalid" ? `Номер неполный: ${digitsCount} цифр, требуется проверка по исходному фото` : undefined}
                               key={columnIndex}
                             >
                               <div className="break-words">{String(row[columnIndex] ?? "") || <span className="text-[#a3ada9]">пусто</span>}</div>
                               {mark === "generated" && <span className="mt-1 inline-flex text-[10px] font-semibold uppercase text-[#97651d]">сгенерировано</span>}
                               {mark === "custom" && <span className="mt-1 inline-flex text-[10px] font-semibold uppercase text-[#37689a]">изменено</span>}
+                              {mark === "phone-invalid" && <span className="mt-1 inline-flex text-[10px] font-semibold uppercase text-orange-700">требует проверки</span>}
                             </td>
                           );
                         })}
@@ -767,20 +850,47 @@ export function ExcelTab({
             <Card className="p-5">
               <SectionTitle title={`Маппинг колонок · ${mappedCount} из 5`} description="Проверьте соответствие и при необходимости выберите колонки вручную." />
               <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                {STANDARD_MAPPING_FIELDS.map((field) => (
-                  <label key={field}>
-                    <span className="mb-1.5 block text-sm font-medium">{FIELD_LABELS[field]}</span>
-                    <select
-                      className="h-10 w-full rounded-md border border-[#cbd6d2] bg-white px-3 text-sm"
-                      value={analysis.mapping[field] ?? ""}
-                      onChange={(event) => updateColumnMapping(field, event.target.value)}
-                    >
-                      <option value="">Не определено</option>
-                      {columnOptions.map(({ index, label }) => <option value={index} key={index}>{label}</option>)}
-                    </select>
-                    <p className="mt-1.5 text-xs leading-5 text-[#71807b]">{analysis.formats[field] || "Формат не определён"}</p>
-                  </label>
-                ))}
+                {STANDARD_MAPPING_FIELDS.map((field) => {
+                  const conflict = analysis.conflicts?.find(
+                    (c: MappingConflict) => c.field === field,
+                  );
+                  const selectedCol = analysis.mapping[field];
+                  const samples = selectedCol !== null && selectedCol !== undefined && table
+                    ? sampleColumnValues(table.rows, selectedCol, 3)
+                    : [];
+                  return (
+                    <label key={field}>
+                      <span className="mb-1.5 block text-sm font-medium">{FIELD_LABELS[field]}</span>
+                      <select
+                        className="h-10 w-full rounded-md border border-[#cbd6d2] bg-white px-3 text-sm"
+                        value={analysis.mapping[field] ?? ""}
+                        onChange={(event) => updateColumnMapping(field, event.target.value)}
+                      >
+                        <option value="">Не определено</option>
+                        {columnOptions.map(({ index, label }) => <option value={index} key={index}>{label}</option>)}
+                      </select>
+                      {conflict && (
+                        <p className="mt-1 flex items-start gap-1 text-xs leading-5 text-amber-700">
+                          <span>⚠️</span>
+                          <span>Заголовок указывал на другую колонку — данные не совпали, выбрана колонка с подходящим содержимым.</span>
+                        </p>
+                      )}
+                      {samples.length > 0 && (
+                        <p className="mt-1 text-xs leading-5 text-[#71807b]">
+                          {analysis.formats[field] || "Формат не определён"}{" "}
+                          <span className="font-medium text-[#4a6b65]">
+                            {samples.slice(0, 3).map((s, i) => (
+                              <span key={i}>{i > 0 ? " · " : ""}{s}</span>
+                            ))}
+                          </span>
+                        </p>
+                      )}
+                      {samples.length === 0 && (
+                        <p className="mt-1 text-xs leading-5 text-[#71807b]">{analysis.formats[field] || "Формат не определён"}</p>
+                      )}
+                    </label>
+                  );
+                })}
               </div>
               <div className="mt-5 rounded-md border border-[#d9e4e0] bg-[#f7faf8] p-4">
                 <div className="flex flex-wrap items-start justify-between gap-2">
