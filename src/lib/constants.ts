@@ -22,12 +22,21 @@ export const DEFAULT_SETTINGS: AppSettings = {
   }],
   activeVisionAgentId: "default-vision-agent",
   parallelRequests: DEFAULT_PARALLEL_REQUESTS,
+  tableAgents: [{
+    id: "default-table-agent",
+    name: "Excel-агент 1",
+    baseUrl: "https://routerai.ru/api/v1",
+    apiKey: "",
+    model: "deepseek/deepseek-v4-flash",
+  }],
+  activeTableAgentId: "default-table-agent",
   table: {
     baseUrl: "https://routerai.ru/api/v1",
     apiKey: "",
     model: "deepseek/deepseek-v4-flash",
   },
   extractionPrompt: DEFAULT_EXTRACTION_PROMPT,
+  agentTimeout: 60,
 };
 
 export const EMPTY_MAPPING: ColumnMapping = {

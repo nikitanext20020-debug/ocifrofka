@@ -19,6 +19,7 @@ const bodySchema = z.object({
   fixedValues: z.record(z.string(), z.string()).optional().default({}),
   instruction: z.string().max(3000).optional().default(""),
   sequenceStart: z.number().int().nonnegative().optional().default(0),
+  forbiddenTexts: z.array(z.string()).optional().default([]),
 });
 
 class GeneratedRowsError extends Error {}
@@ -30,6 +31,14 @@ const TEXT_STRUCTURES = [
   "сначала когда или при каких обстоятельствах возникает проблема, затем что изменить",
   "сначала что перестало справляться или устарело, затем чем это заменить или дополнить",
   "сначала короткое наблюдение, затем ожидаемый результат без слов «нужно» и «необходимо»",
+  "сначала причина недовольства жителей, затем предложение по улучшению",
+  "сначала описание текущего опасного или неудобного участка, затем просьба принять меры безопасности",
+  "сначала где именно не хватает инфраструктуры, затем какое именно сооружение или объект там требуется поставить",
+  "сначала указание на конкретную проблему в работе ЖКХ или благоустройства, затем необходимое действие для её решения",
+  "сначала сравнение с хорошим примером в соседнем районе, затем предложение сделать аналогично здесь",
+  "сначала описание неудобства для детей или пожилых людей, затем конкретное изменение",
+  "сначала техническое состояние объекта (разрушен, сломан), затем просьба отремонтировать или заменить",
+  "сначала указание на мусор или беспорядок, затем требование навести чистоту или установить урны/баки"
 ] as const;
 
 function normalized(value: unknown) {
@@ -49,8 +58,10 @@ function syntheticPhone(index: number) {
   // Keep generated test data obviously synthetic, but varied enough to avoid
   // looking like a placeholder copied into every row. The leading plus is
   // intentionally omitted because spreadsheets may parse it as a formula.
-  const operator = 900 + ((index * 47 + 13) % 100);
-  const subscriber = String((1_000_003 + index * 7_919) % 10_000_000).padStart(7, "0");
+  const OP_CODES = [903, 905, 906, 909, 910, 915, 916, 920, 925, 926, 929, 930, 950, 960, 965, 977, 985, 999];
+  const operator = OP_CODES[(index * 13 + 7) % OP_CODES.length];
+  const baseVal = 1000000 + (index * 982451653) % 9000000;
+  const subscriber = String(baseVal).padStart(7, "0");
   return `7(${operator})${subscriber.slice(0, 3)}-${subscriber.slice(3, 5)}-${subscriber.slice(5)}`;
 }
 
@@ -66,7 +77,7 @@ function topicSimilarity(left: string, right: string) {
   return shared / new Set([...leftWords, ...rightWords]).size;
 }
 
-function topicQualityIssues(rows: string[][], headers: string[], examples: unknown[][]) {
+function topicQualityIssues(rows: string[][], headers: string[], examples: unknown[][], forbiddenTexts: string[]) {
   const issues: string[] = [];
   const topicColumn = headers.findIndex((header) => normalized(header) === "текст наказа");
   if (topicColumn < 0) return issues;
@@ -95,10 +106,11 @@ function topicQualityIssues(rows: string[][], headers: string[], examples: unkno
   const exampleTexts = examples
     .map((row) => String(row[topicColumn] ?? "").trim())
     .filter(Boolean);
+  const normalizedForbidden = forbiddenTexts.map((text) => normalized(text)).filter(Boolean);
   texts.forEach((text, index) => {
-    const comparisonTexts = [...exampleTexts, ...texts.slice(0, index)];
+    const comparisonTexts = [...exampleTexts, ...texts.slice(0, index), ...normalizedForbidden];
     if (comparisonTexts.some((candidate) => topicSimilarity(text, candidate) >= 0.75)) {
-      issues.push("есть обращение, слишком похожее на соседнее или исходное");
+      issues.push("есть обращение, слишком похожее на другое существующее или запрещенное");
     }
   });
 
@@ -177,7 +189,7 @@ function validateAndNormalizeRows(sources: GeneratedRowSource[], body: z.infer<t
     rows: normalizedRows,
     qualityIssues: [...new Set([
       ...normalizationIssues,
-      ...topicQualityIssues(normalizedRows, body.headers, body.examples),
+      ...topicQualityIssues(normalizedRows, body.headers, body.examples, body.forbiddenTexts),
     ])],
   };
 }
@@ -200,6 +212,8 @@ export async function POST(request: Request) {
       ...(body.categoricals[header] ? { allowedValues: body.categoricals[header] } : {}),
       ...(body.fixedValues[header] ? { fixedValue: body.fixedValues[header] } : {}),
     }));
+    const TOPICS = ["ЖКХ", "Дороги", "Транспорт", "Медицина", "Образование", "Благоустройство", "Спорт", "Культура", "Безопасность", "Связь"];
+
     const generate = (retry = false) => callStructured({
       config,
       schema: generatedRowsSchema,
@@ -220,7 +234,14 @@ export async function POST(request: Request) {
             " Не добавляй политическую принадлежность от имени вымышленных людей: если для колонки вовлечённости доступно значение «Иное», используй его.",
             " Не добавляй пояснений, Markdown и заголовков.",
             body.instruction.trim() ? `\nДополнительная инструкция пользователя:\n${body.instruction.trim()}` : "",
-            `\nСтруктурный план текстов по порядку строк. Не копируй формулировку плана в результат:\n${Array.from({ length: body.count }, (_, index) => `${index + 1}: ${TEXT_STRUCTURES[(index * 5 + (retry ? 1 : 0)) % TEXT_STRUCTURES.length]}`).join("\n")}`,
+            body.forbiddenTexts.length > 0
+              ? `\nНе повторяй темы, формулировки и сюжеты из следующего списка запрещенных текстов (список forbidden):\n${body.forbiddenTexts.map((t) => `- ${t}`).join("\n")}`
+              : "",
+            `\nДетальный план для каждой строки (тематика и структура текста). Строго следуй указанной теме и структуре, но формулировку плана в результат не копируй:\n${Array.from({ length: body.count }, (_, index) => {
+              const topic = TOPICS[index % TOPICS.length];
+              const struct = TEXT_STRUCTURES[(index * 5 + (retry ? 1 : 0)) % TEXT_STRUCTURES.length];
+              return `${index + 1}: Тематика обращения = «${topic}». Структура текста = ${struct}.`;
+            }).join("\n")}`,
             retry ? "\nПредыдущий вариант оказался слишком шаблонным или нарушил формат. Полностью перепиши строки, особенно начала обращений, и строго соблюдай два коротких предложения." : "",
           ].join(""),
         },

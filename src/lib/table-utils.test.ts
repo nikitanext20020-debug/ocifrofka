@@ -16,19 +16,45 @@ describe("normalizeTable", () => {
       ["", "МУНИЦИПАЛИТЕТ", "Адрес проживания", "Фамилия", "Имя", "Отчество", "Дата", "Номер мобильного телефона", "E-mail", "Вовлеченность в деятельность Партии", "Тематика предложения", "Направление обращения", "Текст наказа", ""],
       ["", "Богородский г.о.", "Ногинск", "Иванов", "Иван", "Иванович", "01.01.1990", "7999", "", "Иное", "ЖКХ", "Благоустройство", "Починить дорогу", "Родионова"],
     ])).toEqual({
-      headers: ["Колонка 1", "МУНИЦИПАЛИТЕТ", "Адрес проживания", "Фамилия", "Имя", "Отчество", "Дата", "Номер мобильного телефона", "E-mail", "Вовлеченность в деятельность Партии", "Тематика предложения", "Направление обращения", "Текст наказа"],
-      rows: [["", "Богородский г.о.", "Ногинск", "Иванов", "Иван", "Иванович", "01.01.1990", "7999", "", "Иное", "ЖКХ", "Благоустройство", "Починить дорогу"]],
+      // Width = max(14 header cols, 14 data cols) = 14; trailing empty header → "Колонка 14".
+      // Data value "Родионова" at col 13 is no longer dropped.
+      headers: ["Колонка 1", "МУНИЦИПАЛИТЕТ", "Адрес проживания", "Фамилия", "Имя", "Отчество", "Дата", "Номер мобильного телефона", "E-mail", "Вовлеченность в деятельность Партии", "Тематика предложения", "Направление обращения", "Текст наказа", "Колонка 14"],
+      rows: [["", "Богородский г.о.", "Ногинск", "Иванов", "Иван", "Иванович", "01.01.1990", "7999", "", "Иное", "ЖКХ", "Благоустройство", "Починить дорогу", "Родионова"]],
     });
   });
 
-  it("drops stray values to the right of the last named column", () => {
+  it("includes data-row values beyond the last named header column (no width cap)", () => {
+    // Previously the table was capped at the last named header column and
+    // "случайное значение" was dropped.  New policy: width = max(headers, data).
     expect(normalizeTable([
       ["ФИО", "Телефон", ""],
       ["Иванов", "7999", "случайное значение"],
     ])).toEqual({
-      headers: ["ФИО", "Телефон"],
-      rows: [["Иванов", "7999"]],
+      headers: ["ФИО", "Телефон", "Колонка 3"],
+      rows: [["Иванов", "7999", "случайное значение"]],
     });
+  });
+
+  it("expands merged cells and aligns headers with data columns", () => {
+    // Simulates a worksheet where the first row has a merged cell spanning
+    // cols 0-1 (value "Группа"), and the second row contains the real
+    // descriptive headers recognised by findDescriptiveHeaderRowIndex.
+    const matrix = [
+      ["Группа", "",   "C",  "D",    "E"],
+      ["Фамилия", "Имя", "Адрес проживания", "Дата", "Номер мобильного телефона"],
+      ["Иванов",  "Иван", "ул. Ленина, д. 1", "01.01.1990", "+7(905)123-45-67"],
+    ];
+    // Merge: row 0, cols 0-1 (top-left value "Группа" fills col 1 too)
+    const merges = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 1 } }];
+    const result = normalizeTable(matrix, merges);
+    // Header row = row 1 (score >= 3 descriptive headers)
+    expect(result.headers).toEqual([
+      "Фамилия", "Имя", "Адрес проживания", "Дата", "Номер мобильного телефона",
+    ]);
+    // Data columns must align: address is at index 2 in both header and data
+    expect(result.rows[0]?.[2]).toBe("ул. Ленина, д. 1");
+    expect(result.rows[0]?.[0]).toBe("Иванов");
+    expect(result.rows[0]?.[4]).toBe("+7(905)123-45-67");
   });
 });
 
@@ -155,6 +181,33 @@ describe("findGapCells", () => {
     expect(gaps).toEqual([{ row: 0, column: 0 }, { row: 0, column: 1 }]);
     expect(applyCellChanges(table.rows, [{ row: 0, column: 0, value: "Ремонт дороги" }], new Set(["0:0"])).rows)
       .toEqual([["Ремонт дороги", ""]]);
+  });
+
+  it("detects fixable and invalid phone numbers", () => {
+    const table = {
+      headers: ["ФИО", "Телефон"],
+      rows: [
+        ["Иванов", "89051234567"], // fixable -> 7(905)123-45-67
+        ["Петров", "7(905)12-45"],  // invalid (too short)
+        ["Сидоров", "7(905)123-45-67"], // ok
+      ],
+    };
+    const mapping: ColumnMapping = {
+      topic: null,
+      full_name: 0,
+      last_name: null,
+      first_name: null,
+      middle_name: null,
+      birth_date: null,
+      address: null,
+      phone: 1,
+    };
+
+    const gaps = findGapCells(table, mapping, [0, 1, 2]);
+    expect(gaps).toEqual([
+      { row: 0, column: 1, phoneStatus: "fixable", phoneFormatted: "7(905)123-45-67" },
+      { row: 1, column: 1, phoneStatus: "invalid" },
+    ]);
   });
 });
 
@@ -387,5 +440,23 @@ describe("mergeRecordsAt with separate name columns", () => {
     const { rows } = mergeRecordsAt(table, [record], mapping, 0);
 
     expect(rows[0]).toEqual(["Котова", "Людмила", "Сергеевна"]);
+  });
+});
+
+describe("markSyntheticRowsForExport", () => {
+  it("creates a status column and marks synthetic rows, keeping other data intact", () => {
+    const table = {
+      headers: ["ФИО", "Телефон"],
+      rows: [
+        ["Иванов", "7(905)123-45-67"],
+        ["Петров", "7(916)111-22-33"],
+      ],
+    };
+    const result = markSyntheticRowsForExport(table, [1]);
+    expect(result.headers).toEqual(["ФИО", "Телефон", "Статус данных"]);
+    expect(result.rows).toEqual([
+      ["Иванов", "7(905)123-45-67", ""],
+      ["Петров", "7(916)111-22-33", "Синтетические данные"],
+    ]);
   });
 });

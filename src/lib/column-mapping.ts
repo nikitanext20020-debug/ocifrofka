@@ -58,6 +58,36 @@ function normalizeHeader(value: unknown) {
     .trim();
 }
 
+/** Returns up to `n` non-empty, non-dash column values from the data rows. */
+export function sampleColumnValues(rows: unknown[][], column: number, n = 20): string[] {
+  const result: string[] = [];
+  for (const row of rows) {
+    if (result.length >= n) break;
+    const value = String(row[column] ?? "").trim();
+    if (value && value !== "-") result.push(value);
+  }
+  return result;
+}
+
+// Content heuristics: returns true when the column's sample values look like the field.
+const CONTENT_HEURISTICS: Partial<Record<MappableField, (samples: string[]) => boolean>> = {
+  address: (samples) =>
+    samples.some((v) => /(ул\.|улица|д\.|дом|просп|пер\.|мкр)/i.test(v)),
+  phone: (samples) =>
+    samples.some((v) => (v.match(/\d/g) ?? []).length >= 10),
+  birth_date: (samples) =>
+    samples.some((v) => /\d{1,2}\.\d{1,2}\.\d{4}/.test(v) || /\d{4}-\d{2}-\d{2}/.test(v)),
+  full_name: (samples) =>
+    samples.some((v) => {
+      const words = v.split(/\s+/).filter(Boolean);
+      return (
+        words.length >= 2 &&
+        words.length <= 3 &&
+        words.every((w) => /^[А-ЯЁA-Z]/u.test(w))
+      );
+    }),
+};
+
 function fieldForHeader(value: unknown): MappableField | null {
   const normalized = normalizeHeader(value);
   if (!normalized) return null;
@@ -101,16 +131,26 @@ function findEmbeddedHeaderRow(rows: unknown[][]) {
   return bestScore >= 3 ? best : null;
 }
 
+export type MappingConflict = {
+  field: MappableField;
+  headerColumn: number;
+  dataColumn: number;
+};
+
 /**
  * Makes obvious mappings deterministic instead of trusting a model to infer
  * them. Some source workbooks have a technical first row (A, C, D...) and put
  * the descriptive headers in the next row, so that row is considered too.
+ *
+ * Content validation: if the header-matched column's values don't pass the
+ * field heuristic, but another column's values do, the data-matching column
+ * wins and the discrepancy is recorded as a conflict.
  */
 export function refineColumnMapping(
   headers: string[],
   rows: unknown[][],
   modelMapping: ColumnMapping,
-): ColumnMapping {
+): { mapping: ColumnMapping; conflicts: MappingConflict[] } {
   const mapping = { ...modelMapping };
   const embeddedHeaders = findEmbeddedHeaderRow(rows);
   const detected: Partial<Record<MappableField, number>> = {};
@@ -140,7 +180,39 @@ export function refineColumnMapping(
     for (const field of detectedNameParts) mapping[field] = null;
   }
 
-  return mapping;
+  // Content-based validation: for fields with a heuristic, check whether the
+  // header-assigned column actually contains expected data. If not, search for
+  // a better column among the remaining ones.
+  const conflicts: MappingConflict[] = [];
+  const contentFields = ["address", "phone", "birth_date", "full_name"] as const;
+  for (const field of contentFields) {
+    const heuristic = CONTENT_HEURISTICS[field];
+    if (!heuristic) continue;
+    const currentCol = mapping[field];
+    if (currentCol === null || currentCol === undefined) continue;
+
+    const currentSamples = sampleColumnValues(rows, currentCol);
+    if (currentSamples.length > 0 && heuristic(currentSamples)) continue; // already OK
+
+    // Header-matched column fails the heuristic — look for a better one.
+    const betterCol = headers.findIndex((_, colIdx) => {
+      if (colIdx === currentCol) return false;
+      // Skip columns already assigned to another field.
+      const alreadyUsed = (Object.values(mapping) as Array<number | null>).some(
+        (v) => v === colIdx && v !== currentCol,
+      );
+      if (alreadyUsed) return false;
+      const samples = sampleColumnValues(rows, colIdx);
+      return samples.length > 0 && heuristic(samples);
+    });
+
+    if (betterCol >= 0) {
+      conflicts.push({ field, headerColumn: currentCol, dataColumn: betterCol });
+      mapping[field] = betterCol;
+    }
+  }
+
+  return { mapping, conflicts };
 }
 
 function emptyMapping(): ColumnMapping {
@@ -196,7 +268,7 @@ function localFormats(mapping: ColumnMapping, rows: unknown[][]): Record<RecordF
 
 /** Avoids a model request when descriptive headers fully identify the table. */
 export function analyzeTableDeterministically(headers: string[], rows: unknown[][]) {
-  const mapping = refineColumnMapping(headers, rows, emptyMapping());
+  const { mapping, conflicts } = refineColumnMapping(headers, rows, emptyMapping());
   if (!hasCompleteCoreMapping(mapping)) return null;
-  return { mapping, formats: localFormats(mapping, rows) };
+  return { mapping, formats: localFormats(mapping, rows), conflicts };
 }

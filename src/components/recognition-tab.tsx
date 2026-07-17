@@ -21,11 +21,11 @@ import { toast } from "sonner";
 import { MAX_FILE_SIZE } from "@/lib/constants";
 import { compressImage, createThumbnail, fileToDataUrl, pdfToImages } from "@/lib/client-images";
 import { getActiveVisionAgent, normalizeParallelRequests } from "@/lib/vision-agents";
-import { fetchWithRateLimitRetry, runPromisePool } from "@/lib/recognition-queue";
+import { fetchWithFailover, runPromisePool } from "@/lib/recognition-queue";
 import { parseRecognitionSession } from "@/lib/recognition-session";
 import { extractedRecordResponseSchema } from "@/lib/schemas";
 import { FIELD_LABELS, RECORD_FIELDS, type AppSettings, type ExtractedRecord, type RecordField } from "@/lib/types";
-import { downloadBlob, agentHeaders, readApiResponse, cn } from "@/lib/utils";
+import { downloadBlob, readApiResponse, cn } from "@/lib/utils";
 import { loggedFetch, logAppError } from "@/lib/app-logs";
 import { recordsToCsv } from "@/lib/table-utils";
 import { correctBogorodskyAddress } from "@/lib/address-correction";
@@ -132,19 +132,22 @@ export function RecognitionTab({
           if (compressed.length > 11_000_000) {
             compressed = await compressImage(image.dataUrl, 1400, 0.72);
           }
-          const payload = await readApiResponse<unknown>(
-            await fetchWithRateLimitRetry("/api/extract", {
-              method: "POST",
-              headers: agentHeaders(activeVisionAgent),
-              body: JSON.stringify({ image: compressed, prompt: settings.extractionPrompt }),
-            }, {
-              fetcher: (input, init) => loggedFetch(input, init, {
-                area: "Распознавание",
-                action: "Распознавание страницы",
-                details: { batchPosition: index + 1, batchCount: selectedImages.length },
-              }),
+          const response = await fetchWithFailover({
+            agents: settings.visionAgents,
+            activeAgentId: settings.activeVisionAgentId,
+            timeoutSeconds: settings.agentTimeout ?? 60,
+            path: "/api/extract",
+            method: "POST",
+            body: JSON.stringify({ image: compressed, prompt: settings.extractionPrompt }),
+            area: "Распознавание",
+            action: "Распознавание страницы",
+            fetcher: (input, init) => loggedFetch(input, init, {
+              area: "Распознавание",
+              action: "Распознавание страницы",
+              details: { batchPosition: index + 1, batchCount: selectedImages.length },
             }),
-          );
+          });
+          const payload = await readApiResponse<unknown>(response);
           const parsed = extractedRecordResponseSchema.parse(payload);
           const addressCorrection = correctBogorodskyAddress(parsed.address);
           const correctionNote = addressCorrection.changed

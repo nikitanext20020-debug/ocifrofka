@@ -7,6 +7,7 @@ import type {
   RecordField,
   TableData,
 } from "@/lib/types";
+import { normalizeRuPhone } from "@/lib/phone";
 import { NAME_PART_FIELDS, RECORD_FIELDS } from "@/lib/types";
 import { findDescriptiveHeaderRowIndex } from "@/lib/column-mapping";
 
@@ -60,8 +61,13 @@ export function splitFullName(value: string): Record<NamePartField, string> {
   };
 }
 
+/**
+ * Normalise a raw phone string for storage/API use.
+ * Delegates to normalizeRuPhone; on invalid input returns the original value.
+ * Always formats without the leading "+" (spreadsheets may interpret it as formula).
+ */
 export function normalizePhone(value: string) {
-  return value.replaceAll("+", "").trim();
+  return normalizeRuPhone(value, false).formatted;
 }
 
 function valuesForMapping(record: Record<RecordField, string>) {
@@ -72,22 +78,56 @@ function valuesForMapping(record: Record<RecordField, string>) {
   } satisfies Record<MappableField, string>;
 }
 
-export function normalizeTable(matrix: unknown[][]): TableData {
+/** Merge-range descriptor matching SheetJS worksheet["!merges"]. */
+type MergeRange = { s: { r: number; c: number }; e: { r: number; c: number } };
+
+/**
+ * Normalises a raw 2-D matrix (as produced by SheetJS sheet_to_json with
+ * header:1) into a {headers, rows} TableData.
+ *
+ * @param merges - Optional list of merged-cell ranges from the worksheet
+ *   (worksheet["!merges"]). When provided, the value of the top-left cell of
+ *   each merge is copied into every cell of that range before the header row
+ *   is detected, so merged column headers are never lost.
+ *
+ * Width policy: max(headerRow.length, maxDataRowLength). Empty header cells
+ * receive the stable placeholder name "Колонка N" so they can be mapped.
+ */
+export function normalizeTable(matrix: unknown[][], merges?: MergeRange[]): TableData {
   if (matrix.length === 0) return { headers: [], rows: [] };
-  const headerRowIndex = findDescriptiveHeaderRowIndex(matrix);
-  const rawHeaders = matrix[headerRowIndex] ?? [];
-  const lastNamedColumn = rawHeaders.reduce<number>(
-    (last, value, index) => String(value ?? "").trim() ? index : last,
-    -1,
-  );
-  const width = lastNamedColumn >= 0
-    ? lastNamedColumn + 1
-    : Math.max(...matrix.map((row) => row.length), 0);
+
+  // Expand merged cells: propagate top-left value to every cell in the range.
+  let working = matrix;
+  if (merges?.length) {
+    working = matrix.map((row) => [...row]);
+    for (const { s, e } of merges) {
+      const topLeft = working[s.r]?.[s.c] ?? "";
+      for (let r = s.r; r <= e.r; r++) {
+        const row = working[r];
+        if (!row) continue;
+        for (let c = s.c; c <= e.c; c++) {
+          if (r === s.r && c === s.c) continue;
+          while (row.length <= c) row.push("");
+          row[c] = topLeft;
+        }
+      }
+    }
+  }
+
+  const headerRowIndex = findDescriptiveHeaderRowIndex(working);
+  const rawHeaders = working[headerRowIndex] ?? [];
+  const dataRows = working.slice(headerRowIndex + 1);
+
+  // Width = max(header row length, longest data row). No cap at last named column.
+  const headerWidth = rawHeaders.length;
+  const dataWidth = dataRows.reduce((max, row) => Math.max(max, row.length), 0);
+  const width = Math.max(headerWidth, dataWidth);
+
   const headers = Array.from({ length: width }, (_, index) => {
     const value = String(rawHeaders[index] ?? "").trim();
     return value || `Колонка ${index + 1}`;
   });
-  const rows = matrix.slice(headerRowIndex + 1).map((row) =>
+  const rows = dataRows.map((row) =>
     Array.from({ length: width }, (_, index) => row[index] ?? ""),
   );
   return { headers, rows };
@@ -230,11 +270,20 @@ export function isEmptyCell(value: unknown) {
   return !normalized || normalized === "-" || SPREADSHEET_ERROR_VALUES.has(normalized.toUpperCase());
 }
 
+export type GapCell = {
+  row: number;
+  column: number;
+  /** Present only for phone-column cells with non-empty, non-canonical values. */
+  phoneStatus?: "fixable" | "invalid";
+  /** Canonical formatted value (only when phoneStatus === "fixable"). */
+  phoneFormatted?: string;
+};
+
 export function findGapCells(
   table: TableData,
   mapping: ColumnMapping,
   targetRows: readonly number[],
-) {
+): GapCell[] {
   const mappedColumns = [...new Set(Object.values(mapping).filter(
     (column): column is number => column !== null,
   ))];
@@ -242,22 +291,31 @@ export function findGapCells(
     .map((header, column) => ({ header, column }))
     .filter(({ header }) => isDerivedCategoryHeader(header))
     .map(({ column }) => column);
-  const gaps: Array<{ row: number; column: number }> = [];
+  const phoneColumn = mapping.phone;
+  const gaps: GapCell[] = [];
   const seen = new Set<string>();
-  const addTarget = (row: number, column: number) => {
+  const addTarget = (row: number, column: number, extra?: Omit<GapCell, "row" | "column">) => {
     const key = `${row}:${column}`;
     if (seen.has(key)) return;
     seen.add(key);
-    gaps.push({ row, column });
+    gaps.push({ row, column, ...extra });
   };
 
   for (const rowIndex of [...new Set(targetRows)]) {
     const row = table.rows[rowIndex];
     if (!row) continue;
     mappedColumns.forEach((column) => {
-      if (column < table.headers.length && isEmptyCell(row[column])) {
-        addTarget(rowIndex, column);
+      if (column >= table.headers.length) return;
+      const cellValue = String(row[column] ?? "").trim();
+      // Phone column: check for fixable / invalid non-empty values
+      if (column === phoneColumn && !isEmptyCell(cellValue)) {
+        const { status, formatted } = normalizeRuPhone(cellValue, false);
+        if (status === "fixed") addTarget(rowIndex, column, { phoneStatus: "fixable", phoneFormatted: formatted });
+        else if (status === "invalid") addTarget(rowIndex, column, { phoneStatus: "invalid" });
+        // status === "ok" → already correct, skip
+        return;
       }
+      if (isEmptyCell(cellValue)) addTarget(rowIndex, column);
     });
 
     const topicColumn = mapping.topic;
