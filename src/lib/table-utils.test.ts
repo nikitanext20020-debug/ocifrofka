@@ -103,6 +103,31 @@ describe("normalizeTable", () => {
       ["Петров", "", "7888"],
     ]);
   });
+
+  it("prunes trailing garbage column with stray dot at index 30 when there are 13 real columns", () => {
+    // 13 real columns: headers are non-empty meaningful headers (not single letter/digit)
+    const headerRow = Array.from({ length: 31 }, (_, i) => i < 13 ? `Заголовок ${i + 1}` : "");
+    // Since columns 13 to 30 are not real (empty headers, fill ratio < 1% because 1/1=100%? Wait!
+    // If dataRows.length is 1, ratio is 100% >= 1%, so it would NOT prune!
+    // To make sure it prunes, let's create a spreadsheet with 200 rows, so 1 cell in column 30 is 1/200 = 0.5% < 1% (and 1 < 5) -> prunes!
+    const manyRows = Array.from({ length: 200 }, (_, rowIndex) => 
+      Array.from({ length: 31 }, (_, i) => i < 13 ? `Значение ${i + 1}` : (i === 30 && rowIndex === 0 ? "." : ""))
+    );
+    const resultMany = normalizeTable([headerRow, ...manyRows]);
+    expect(resultMany.headers.length).toBe(13);
+    expect(resultMany.rows[0]?.length).toBe(13);
+  });
+
+  it("retains columns without header when filled to 50%", () => {
+    const matrix = [
+      ["ФИО", "", "Телефон"],
+      ["Иванов", "Да", "7999"],
+      ["Петров", "", "7888"],
+    ];
+    const result = normalizeTable(matrix);
+    // Column 1 is empty in headers, but in dataRows it has "Да" (1 out of 2 rows = 50% >= 1%) -> kept!
+    expect(result.headers).toEqual(["ФИО", "Колонка 2", "Телефон"]);
+  });
 });
 
 describe("isEmptyCell", () => {

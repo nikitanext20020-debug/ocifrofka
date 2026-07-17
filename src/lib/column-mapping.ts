@@ -76,7 +76,7 @@ function matchesRatio(samples: string[], predicate: (v: string) => boolean): boo
 }
 
 // Content heuristics: returns true when the column's sample values look like the field.
-const CONTENT_HEURISTICS: Partial<Record<MappableField, (samples: string[]) => boolean>> = {
+export const CONTENT_HEURISTICS: Partial<Record<MappableField, (samples: string[]) => boolean>> = {
   address: (samples) =>
     matchesRatio(samples, (v) => /(ул\.|улица|\bд\.|\bдом\b|просп|пер\.|мкр)/i.test(v)),
   phone: (samples) =>

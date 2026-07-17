@@ -132,7 +132,27 @@ export function normalizeTable(matrix: unknown[][], merges?: MergeRange[]): Tabl
   const maxDataRowEffectiveLength = dataRows.reduce((max, row) => Math.max(max, getEffectiveLength(row)), 0);
   const width = Math.max(rawHeadersEffectiveLength, maxDataRowEffectiveLength);
 
-  const headers = Array.from({ length: width }, (_, index) => {
+  let lastRealColumnIndex = -1;
+  const singleCharOrDigitRegex = /^(\d|[A-Za-zА-Яа-я])$/i;
+  for (let c = 0; c < width; c++) {
+    const header = String(rawHeaders[c] ?? "").trim();
+    const isMeaningfulHeader = header !== "" && !singleCharOrDigitRegex.test(header);
+
+    let nonEmptyCount = 0;
+    for (const row of dataRows) {
+      if (!isEmptyCell(row[c])) {
+        nonEmptyCount++;
+      }
+    }
+    const ratio = dataRows.length > 0 ? nonEmptyCount / dataRows.length : 0;
+    const isReal = isMeaningfulHeader || ratio >= 0.01 || nonEmptyCount >= 5;
+    if (isReal) {
+      lastRealColumnIndex = c;
+    }
+  }
+  const finalWidth = lastRealColumnIndex + 1;
+
+  const headers = Array.from({ length: finalWidth }, (_, index) => {
     const value = String(rawHeaders[index] ?? "").trim();
     if (value) return value;
     const hasData = dataRows.some((row) => !isEmptyCell(row[index]));
@@ -140,7 +160,7 @@ export function normalizeTable(matrix: unknown[][], merges?: MergeRange[]): Tabl
     return "";
   });
   const rows = dataRows.map((row) =>
-    Array.from({ length: width }, (_, index) => row[index] ?? ""),
+    Array.from({ length: finalWidth }, (_, index) => row[index] ?? ""),
   );
   return { headers, rows, headerRowIndex };
 }
