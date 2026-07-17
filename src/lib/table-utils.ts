@@ -130,7 +130,7 @@ export function normalizeTable(matrix: unknown[][], merges?: MergeRange[]): Tabl
   const rows = dataRows.map((row) =>
     Array.from({ length: width }, (_, index) => row[index] ?? ""),
   );
-  return { headers, rows };
+  return { headers, rows, headerRowIndex };
 }
 
 export function applyRecordCategories(
@@ -307,12 +307,15 @@ export function findGapCells(
     mappedColumns.forEach((column) => {
       if (column >= table.headers.length) return;
       const cellValue = String(row[column] ?? "").trim();
-      // Phone column: check for fixable / invalid non-empty values
-      if (column === phoneColumn && !isEmptyCell(cellValue)) {
-        const { status, formatted } = normalizeRuPhone(cellValue, false);
-        if (status === "fixed") addTarget(rowIndex, column, { phoneStatus: "fixable", phoneFormatted: formatted });
-        else if (status === "invalid") addTarget(rowIndex, column, { phoneStatus: "invalid" });
-        // status === "ok" → already correct, skip
+      // Phone column: check for empty, fixable, or invalid values
+      if (column === phoneColumn) {
+        if (isEmptyCell(cellValue)) {
+          addTarget(rowIndex, column, { phoneStatus: "invalid" });
+        } else {
+          const { status, formatted } = normalizeRuPhone(cellValue, false);
+          if (status === "fixed") addTarget(rowIndex, column, { phoneStatus: "fixable", phoneFormatted: formatted });
+          else if (status === "invalid") addTarget(rowIndex, column, { phoneStatus: "invalid" });
+        }
         return;
       }
       if (isEmptyCell(cellValue)) addTarget(rowIndex, column);

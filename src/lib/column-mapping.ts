@@ -69,16 +69,22 @@ export function sampleColumnValues(rows: unknown[][], column: number, n = 20): s
   return result;
 }
 
+function matchesRatio(samples: string[], predicate: (v: string) => boolean): boolean {
+  if (samples.length < 3) return false;
+  const matches = samples.filter(predicate).length;
+  return matches / samples.length >= 0.5;
+}
+
 // Content heuristics: returns true when the column's sample values look like the field.
 const CONTENT_HEURISTICS: Partial<Record<MappableField, (samples: string[]) => boolean>> = {
   address: (samples) =>
-    samples.some((v) => /(ул\.|улица|д\.|дом|просп|пер\.|мкр)/i.test(v)),
+    matchesRatio(samples, (v) => /(ул\.|улица|\bд\.|\bдом\b|просп|пер\.|мкр)/i.test(v)),
   phone: (samples) =>
-    samples.some((v) => (v.match(/\d/g) ?? []).length >= 10),
+    matchesRatio(samples, (v) => (v.match(/\d/g) ?? []).length >= 10),
   birth_date: (samples) =>
-    samples.some((v) => /\d{1,2}\.\d{1,2}\.\d{4}/.test(v) || /\d{4}-\d{2}-\d{2}/.test(v)),
+    matchesRatio(samples, (v) => /\d{1,2}\.\d{1,2}\.\d{4}/.test(v) || /\d{4}-\d{2}-\d{2}/.test(v)),
   full_name: (samples) =>
-    samples.some((v) => {
+    matchesRatio(samples, (v) => {
       const words = v.split(/\s+/).filter(Boolean);
       return (
         words.length >= 2 &&

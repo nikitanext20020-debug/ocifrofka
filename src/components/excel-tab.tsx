@@ -176,7 +176,8 @@ export function ExcelTab({
         }
       }
 
-      return { ...current, mapping };
+      const conflicts = current.conflicts?.filter((c) => c.field !== field);
+      return { ...current, mapping, conflicts };
     });
   };
 
@@ -415,8 +416,9 @@ export function ExcelTab({
 
       if (writtenRows.length > 0) {
         showTablePage(Math.floor(writtenRows[0] / TABLE_PAGE_SIZE));
-        const startExcel = writtenRows[0] + 2;
-        const endExcel = writtenRows[writtenRows.length - 1] + 2;
+        const headerRowIndex = table?.headerRowIndex ?? 0;
+        const startExcel = writtenRows[0] + headerRowIndex + 2;
+        const endExcel = writtenRows[writtenRows.length - 1] + headerRowIndex + 2;
         setInsertProgress({ startRow: startExcel, endRow: endExcel, count: writtenRows.length });
         const skipped = normalized.length - writtenRows.length;
         let noticeText = `Добавлены строки ${startExcel}–${endExcel}`;
@@ -752,7 +754,7 @@ export function ExcelTab({
                       const rowIndex = visibleRowStart + visibleIndex;
                       return (
                       <tr className={cn("border-b border-[#e5ebe8]", newRows.includes(rowIndex) && "bg-[#e8f7ee]")} key={rowIndex}>
-                        <td className="border-r border-[#e0e7e4] px-3 py-2 text-center text-xs text-[#7b8985]">{rowIndex + 2}</td>
+                        <td className="border-r border-[#e0e7e4] px-3 py-2 text-center text-xs text-[#7b8985]">{rowIndex + (table?.headerRowIndex ?? 0) + 2}</td>
                          {table.headers.map((_, columnIndex) => {
                           const mark = marks[`${rowIndex}:${columnIndex}`];
                           const digitsCount = (String(row[columnIndex] ?? "").replace(/\D/g, "")).length;
@@ -822,13 +824,13 @@ export function ExcelTab({
                     <input
                       id="insert-row-input"
                       type="number"
-                      min={2}
-                      max={table.rows.length + 1}
+                      min={(table?.headerRowIndex ?? 0) + 2}
+                      max={table.rows.length + (table?.headerRowIndex ?? 0) + 2}
                       className="h-9 w-20 rounded-md border border-[#cbd6d2] bg-white px-2 text-center text-sm outline-none focus:border-[#23816e] focus:ring-2 focus:ring-[#23816e]/15"
-                      value={insertRow + 2}
+                      value={insertRow + (table?.headerRowIndex ?? 0) + 2}
                       onChange={(e) => {
                         const v = parseInt(e.target.value, 10);
-                        if (!isNaN(v)) setInsertRow(Math.max(0, Math.min(table.rows.length, v - 2)));
+                        if (!isNaN(v)) setInsertRow(Math.max(0, Math.min(table.rows.length, v - (table?.headerRowIndex ?? 0) - 2)));
                       }}
                     />
                   </label>

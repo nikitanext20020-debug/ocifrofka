@@ -65,6 +65,7 @@ describe("refineColumnMapping", () => {
     const rows = [
       ["Богородский г.о.",  "Ногинск, ул. Дружбы, д. 8", "Иванов", "11.05.1957", "7(963)983-62-52"],
       ["Щёлковский г.о.", "Щёлково, просп. Ленина, д. 1", "Петров", "03.07.1981", "7(916)111-22-33"],
+      ["Химки г.о.", "Химки, мкр. Фирсановка, д. 3", "Сидоров", "25.12.1990", "7(903)777-88-99"],
     ];
     const modelMapping: ColumnMapping = {
       topic: null, full_name: null,
@@ -77,6 +78,26 @@ describe("refineColumnMapping", () => {
     expect(conflicts).toEqual(
       expect.arrayContaining([expect.objectContaining({ field: "address", headerColumn: 0, dataColumn: 1 })]),
     );
+  });
+
+  it("does not match a column containing the word 'дома' in texts as an address", () => {
+    const headers = ["Текст наказа", "Адрес проживания", "Фамилия", "Дата", "Номер мобильного телефона"];
+    const rows = [
+      ["Покрасить фасад дома.", "Богородский г.о.", "Иванов", "11.05.1957", "7(963)983-62-52"],
+      ["Уборка мусора вокруг дома.", "Богородский г.о.", "Петров", "03.07.1981", "7(916)111-22-33"],
+      ["Ремонт кровли дома.", "Богородский г.о.", "Сидоров", "25.12.1990", "7(903)777-88-99"],
+    ];
+    const modelMapping: ColumnMapping = {
+      topic: 0, full_name: null,
+      last_name: 2, first_name: null, middle_name: null,
+      birth_date: 3, address: 1, phone: 4,
+    };
+    const { mapping, conflicts } = refineColumnMapping(headers, rows, modelMapping);
+    // Address must remain col 1 (even though it lacks street names) because col 0 doesn't match address heuristic
+    expect(mapping.address).toBe(1);
+    // There shouldn't be any address conflicts mapping it to col 0
+    const addressConflict = conflicts.find((c) => c.field === "address");
+    expect(addressConflict).toBeUndefined();
   });
 });
 

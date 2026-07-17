@@ -7,6 +7,7 @@ describe("normalizeTable", () => {
     expect(normalizeTable([["ФИО", "", "Телефон"], ["Иванов", "Москва"]])).toEqual({
       headers: ["ФИО", "Колонка 2", "Телефон"],
       rows: [["Иванов", "Москва", ""]],
+      headerRowIndex: 0,
     });
   });
 
@@ -20,6 +21,7 @@ describe("normalizeTable", () => {
       // Data value "Родионова" at col 13 is no longer dropped.
       headers: ["Колонка 1", "МУНИЦИПАЛИТЕТ", "Адрес проживания", "Фамилия", "Имя", "Отчество", "Дата", "Номер мобильного телефона", "E-mail", "Вовлеченность в деятельность Партии", "Тематика предложения", "Направление обращения", "Текст наказа", "Колонка 14"],
       rows: [["", "Богородский г.о.", "Ногинск", "Иванов", "Иван", "Иванович", "01.01.1990", "7999", "", "Иное", "ЖКХ", "Благоустройство", "Починить дорогу", "Родионова"]],
+      headerRowIndex: 1,
     });
   });
 
@@ -32,6 +34,7 @@ describe("normalizeTable", () => {
     ])).toEqual({
       headers: ["ФИО", "Телефон", "Колонка 3"],
       rows: [["Иванов", "7999", "случайное значение"]],
+      headerRowIndex: 0,
     });
   });
 
@@ -55,6 +58,22 @@ describe("normalizeTable", () => {
     expect(result.rows[0]?.[2]).toBe("ул. Ленина, д. 1");
     expect(result.rows[0]?.[0]).toBe("Иванов");
     expect(result.rows[0]?.[4]).toBe("+7(905)123-45-67");
+    expect(result.headerRowIndex).toBe(1);
+  });
+
+  it("evaluates correct Excel row numbers for double-decker header layout", () => {
+    const matrix = [
+      ["Technical Title", "", "", "", ""],
+      ["Фамилия", "Имя", "Адрес проживания", "Дата", "Номер мобильного телефона"],
+      ["Иванов", "Иван", "ул. Ленина", "01.01.1990", "7999"],
+    ];
+    const result = normalizeTable(matrix);
+    expect(result.headerRowIndex).toBe(1);
+    
+    // First data row (rowIndex = 0) Excel row number = rowIndex + headerRowIndex + 2 = 0 + 1 + 2 = 3
+    const firstRowIndex = 0;
+    const excelRow = firstRowIndex + (result.headerRowIndex ?? 0) + 2;
+    expect(excelRow).toBe(3);
   });
 });
 
@@ -159,7 +178,7 @@ describe("findGapCells", () => {
       phone: 1,
     };
 
-    expect(findGapCells(table, mapping, [1])).toEqual([{ row: 1, column: 1 }]);
+    expect(findGapCells(table, mapping, [1])).toEqual([{ row: 1, column: 1, phoneStatus: "invalid" }]);
   });
 
   it("marks a short topic for refinement and allows that intentional replacement", () => {
