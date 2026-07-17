@@ -40,7 +40,7 @@ export async function POST(request: Request) {
         { role: "user", content: JSON.stringify(body) },
       ],
     });
-    const { mapping: refinedMapping } = refineColumnMapping(body.headers, body.rows, result.mapping);
+    const { mapping: refinedMapping, conflicts } = refineColumnMapping(body.headers, body.rows, result.mapping);
     result.mapping = refinedMapping;
     const hasSeparateNameColumns = result.mapping.last_name !== null ||
       result.mapping.first_name !== null || result.mapping.middle_name !== null;
@@ -51,7 +51,7 @@ export async function POST(request: Request) {
         return Response.json({ error: "Модель указала несуществующую колонку. Повторите анализ." }, { status: 502 });
       }
     }
-    return Response.json(result);
+    return Response.json({ ...result, conflicts });
   } catch (error) {
     if (error instanceof z.ZodError) {
       return Response.json({ error: "Таблица не содержит данных для анализа." }, { status: 400 });

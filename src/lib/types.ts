@@ -58,6 +58,7 @@ export type AppSettings = {
 export type TableData = {
   headers: string[];
   rows: unknown[][];
+  headerRowIndex?: number;
 };
 
 export type WorkbookData = {
