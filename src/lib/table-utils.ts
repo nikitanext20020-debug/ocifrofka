@@ -118,14 +118,26 @@ export function normalizeTable(matrix: unknown[][], merges?: MergeRange[]): Tabl
   const rawHeaders = working[headerRowIndex] ?? [];
   const dataRows = working.slice(headerRowIndex + 1);
 
-  // Width = max(header row length, longest data row). No cap at last named column.
-  const headerWidth = rawHeaders.length;
-  const dataWidth = dataRows.reduce((max, row) => Math.max(max, row.length), 0);
-  const width = Math.max(headerWidth, dataWidth);
+  const getEffectiveLength = (row: unknown[]) => {
+    let lastNonEmptyIndex = -1;
+    for (let i = 0; i < row.length; i++) {
+      if (!isEmptyCell(row[i])) {
+        lastNonEmptyIndex = i;
+      }
+    }
+    return lastNonEmptyIndex + 1;
+  };
+
+  const rawHeadersEffectiveLength = getEffectiveLength(rawHeaders);
+  const maxDataRowEffectiveLength = dataRows.reduce((max, row) => Math.max(max, getEffectiveLength(row)), 0);
+  const width = Math.max(rawHeadersEffectiveLength, maxDataRowEffectiveLength);
 
   const headers = Array.from({ length: width }, (_, index) => {
     const value = String(rawHeaders[index] ?? "").trim();
-    return value || `Колонка ${index + 1}`;
+    if (value) return value;
+    const hasData = dataRows.some((row) => !isEmptyCell(row[index]));
+    if (hasData) return `Колонка ${index + 1}`;
+    return "";
   });
   const rows = dataRows.map((row) =>
     Array.from({ length: width }, (_, index) => row[index] ?? ""),

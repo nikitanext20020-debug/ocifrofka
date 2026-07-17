@@ -38,7 +38,10 @@ const TEXT_STRUCTURES = [
   "сначала сравнение с хорошим примером в соседнем районе, затем предложение сделать аналогично здесь",
   "сначала описание неудобства для детей или пожилых людей, затем конкретное изменение",
   "сначала техническое состояние объекта (разрушен, сломан), затем просьба отремонтировать или заменить",
-  "сначала указание на мусор или беспорядок, затем требование навести чистоту или установить урны/баки"
+  "сначала указание на мусор или беспорядок, затем требование навести чистоту или установить урны/баки",
+  "сначала бытовая жалоба, затем просьба разобраться без указания конкретного решения",
+  "сначала как проблема мешает семье автора, затем мягкое пожелание что-то изменить",
+  "сначала как долго длится проблема, затем просьба к администрации обратить внимание"
 ] as const;
 
 function normalized(value: unknown) {
@@ -115,6 +118,23 @@ function topicQualityIssues(rows: string[][], headers: string[], examples: unkno
   });
 
   if (texts.length < 5) return [...new Set(issues)];
+
+  let imperativeSecondSentences = 0;
+  for (const text of texts) {
+    const sentences = text.split(/[.!?](?:\s+|$)/).map((s) => s.trim()).filter(Boolean);
+    const second = sentences[1] ?? "";
+    if (second) {
+      const words = second.toLocaleLowerCase("ru-RU").match(/[a-zа-яё0-9]+/gi) ?? [];
+      const firstWord = words[0] ?? "";
+      if (/(?:йте|ите|ьте)$/.test(firstWord)) {
+        imperativeSecondSentences++;
+      }
+    }
+  }
+  if (imperativeSecondSentences > texts.length * 0.4) {
+    issues.push("слишком много текстов-команд");
+  }
+
   const starts = normalizedTexts.map((text) => (text.match(/[a-zа-я0-9]+/gi) ?? []).slice(0, 2));
   const firstWords = starts.map(([first = ""]) => first);
   const imperativeStarts = firstWords.filter((word) => /(?:йте|ите|ьте)$/.test(word)).length;
@@ -156,6 +176,22 @@ function validateAndNormalizeRows(sources: GeneratedRowSource[], body: z.infer<t
   const fixedColumns = Object.entries(body.fixedValues)
     .map(([header, value]) => ({ column: body.headers.indexOf(header), value }))
     .filter(({ column, value }) => column >= 0 && value.trim());
+  const techHeaderRegex = /^(\d+|[A-Za-zА-Яа-я]|Колонка \d+)$/;
+  const technicalColumnsToClear = body.headers
+    .map((header, column) => {
+      const isTech = techHeaderRegex.test(header.trim());
+      if (!isTech) return null;
+      if (body.examples.length === 0) return column;
+      const filledCount = body.examples.filter((row) => {
+        const val = String(row[column] ?? "").trim();
+        return val !== "" && val !== "-";
+      }).length;
+      const ratio = filledCount / body.examples.length;
+      if (ratio >= 0.8) return null;
+      return column;
+    })
+    .filter((col): col is number => col !== null);
+
   const phoneColumns = body.headers
     .map((header, column) => ({ header, column }))
     .filter(({ header }) => isPhoneHeader(header))
@@ -163,6 +199,9 @@ function validateAndNormalizeRows(sources: GeneratedRowSource[], body: z.infer<t
 
   const normalizedRows = rows.map((source, index) => {
     const row = source.map((value) => String(value ?? "").trim());
+    for (const column of technicalColumnsToClear) {
+      row[column] = "";
+    }
     for (const { column, value } of fixedColumns) row[column] = value;
     for (const { column, values } of categoricalColumns) {
       if (fixedColumns.some((fixed) => fixed.column === column)) continue;
@@ -229,8 +268,9 @@ export async function POST(request: Request) {
             " ФИО должны быть вымышленными, но грамматически согласованными. Телефоны, даты рождения, адреса и остальные поля оформляй точно в стиле examples.",
             " Для текста обращения соблюдай пользовательскую инструкцию и стиль примеров, но создавай новый текст.",
             " Каждый текст должен состоять ровно из двух коротких предложений. Меняй порядок: не ставь прямое действие первым в каждой строке. Пиши разговорно, спокойно и без канцелярита.",
-            " Второе предложение каждого текста обязано содержать конкретное предлагаемое действие (установить, отремонтировать, добавить, заменить, организовать, расширить...), а не только ожидаемый эффект. Текст — это просьба жителя, а не вывод.",
+            " Второе предложение — это просьба или пожелание жителя. Пиши разными голосами: примерно треть текстов — просьба разобраться/решить проблему БЕЗ указания способа (человек не знает, как чинить); треть — пожелание конкретного изменения в форме просьбы («хотелось бы, чтобы поставили лавочку», «просим сделать освещение»), а не команды; остальные могут содержать конкретное действие. Избегай профессионально-технических формулировок («опора освещения», «закрепить прожектор мощностью...») — житель говорит бытовым языком.",
             " Тема текста относится только к содержанию колонки \"Текст наказа\"; для колонок \"Тематика предложения\" и \"Направление обращения\" выбирай строго из allowedValues.",
+            " Колонки с бессмысленными заголовками (одиночные цифры/буквы, \"Колонка N\") и колонки контактов, которых нет в примерах у большинства строк (E-mail и т.п.), оставляй пустыми. Не дублируй адрес в другие колонки.",
             " Не начинай с «Нельзя», «Почему», «Лучше», «Нам бы», «Если можно», «В нашем», «У нас в», «Просим», «Очень просим», «Нужно» или «Необходимо». Не штампуй начала с «В», «Во» и названия населённого пункта. «Хотелось бы» и «Очень ждут» используй не более 1–2 раз во всей подборке.",
             " Не более 40% текстов могут начинаться с повелительного глагола. Используй минимум три разных типа начала: действие, обстоятельство, люди, конкретный факт или наблюдение. Не копируй соседний текст, заменяя только улицу, город или объект. Не используй длинное тире.",
             " Не добавляй политическую принадлежность от имени вымышленных людей: если для колонки вовлечённости доступно значение «Иное», используй его.",

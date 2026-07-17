@@ -19,7 +19,7 @@ describe("normalizeTable", () => {
     ])).toEqual({
       // Width = max(14 header cols, 14 data cols) = 14; trailing empty header → "Колонка 14".
       // Data value "Родионова" at col 13 is no longer dropped.
-      headers: ["Колонка 1", "МУНИЦИПАЛИТЕТ", "Адрес проживания", "Фамилия", "Имя", "Отчество", "Дата", "Номер мобильного телефона", "E-mail", "Вовлеченность в деятельность Партии", "Тематика предложения", "Направление обращения", "Текст наказа", "Колонка 14"],
+      headers: ["", "МУНИЦИПАЛИТЕТ", "Адрес проживания", "Фамилия", "Имя", "Отчество", "Дата", "Номер мобильного телефона", "E-mail", "Вовлеченность в деятельность Партии", "Тематика предложения", "Направление обращения", "Текст наказа", "Колонка 14"],
       rows: [["", "Богородский г.о.", "Ногинск", "Иванов", "Иван", "Иванович", "01.01.1990", "7999", "", "Иное", "ЖКХ", "Благоустройство", "Починить дорогу", "Родионова"]],
       headerRowIndex: 1,
     });
@@ -74,6 +74,34 @@ describe("normalizeTable", () => {
     const firstRowIndex = 0;
     const excelRow = firstRowIndex + (result.headerRowIndex ?? 0) + 2;
     expect(excelRow).toBe(3);
+  });
+
+  it("does not create phantom columns for trailing empty, spaces, or null values", () => {
+    const matrix = [
+      ["ФИО", "Телефон", "", "   ", null],
+      ["Иванов", "7999", "", " ", null],
+      ["Петров", "7888", null, null, ""],
+    ];
+    const result = normalizeTable(matrix);
+    expect(result.headers).toEqual(["ФИО", "Телефон"]);
+    expect(result.rows).toEqual([
+      ["Иванов", "7999"],
+      ["Петров", "7888"],
+    ]);
+  });
+
+  it("retains columns without header when they contain actual data, assigning placeholder name", () => {
+    const matrix = [
+      ["ФИО", "", "Телефон"],
+      ["Иванов", "ул. Ленина", "7999"],
+      ["Петров", "", "7888"],
+    ];
+    const result = normalizeTable(matrix);
+    expect(result.headers).toEqual(["ФИО", "Колонка 2", "Телефон"]);
+    expect(result.rows).toEqual([
+      ["Иванов", "ул. Ленина", "7999"],
+      ["Петров", "", "7888"],
+    ]);
   });
 });
 
