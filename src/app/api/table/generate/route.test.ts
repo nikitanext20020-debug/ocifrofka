@@ -89,4 +89,60 @@ describe("table generator route", () => {
     const payload = await response.json();
     expect(payload.warning).toContain("запрещенное");
   });
+
+  it("clears technical column values unless populated in >=80% of examples", async () => {
+    vi.spyOn(dns, "lookup").mockResolvedValue([
+      { address: "93.184.216.34", family: 4 },
+    ] as unknown as Awaited<ReturnType<typeof dns.lookup>>);
+
+    const rows = [{
+      0: "Иванов Иван",
+      1: "Текст обращения. Просим разобраться.",
+      2: "технический-мусор-будет-стерт",
+      3: "сохраняемое-значение",
+    }];
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({ rows }) } }],
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    // Columns explanation:
+    // Column 0: "ФИО" (not technical)
+    // Column 1: "Текст наказа" (not technical)
+    // Column 2: "Колонка 3" (technical, matched in examples: 0/5 = 0% < 80% -> cleared!)
+    // Column 3: "Колонка 4" (technical, matched in examples: 4/5 = 80% >= 80% -> kept!)
+    const response = await POST(new Request("http://localhost/api/table/generate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-agent-base-url": "https://api.example.com/v1",
+        "x-agent-api-key": "test",
+        "x-agent-model": "test-model",
+      },
+      body: JSON.stringify({
+        count: 1,
+        headers: ["ФИО", "Текст наказа", "Колонка 3", "Колонка 4"],
+        examples: [
+          ["Иванов", "Текст", "", "Да"],
+          ["Петров", "Текст", "", "Да"],
+          ["Сидоров", "Текст", "", "Да"],
+          ["Козлов", "Текст", "", "Да"],
+          ["Смирнов", "Текст", "", ""], // 4 out of 5 filled for column 3
+        ],
+        formats: {},
+        categoricals: {},
+        fixedValues: {},
+        instruction: "",
+      }),
+    }));
+
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload.rows[0]).toEqual([
+      "Иванов Иван",
+      "Текст обращения. Просим разобраться.",
+      "", // cleared!
+      "сохраняемое-значение", // kept!
+    ]);
+  });
 });
