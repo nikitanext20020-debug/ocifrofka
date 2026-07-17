@@ -51,7 +51,7 @@ import { clone, cn, readApiResponse } from "@/lib/utils";
 import { loggedFetch, logAppError } from "@/lib/app-logs";
 import { fetchWithFailover } from "@/lib/recognition-queue";
 import { useLocalStorage } from "@/lib/use-local-storage";
-import { sampleColumnValues } from "@/lib/column-mapping";
+import { CONTENT_HEURISTICS, sampleColumnValues } from "@/lib/column-mapping";
 import { Button, Card, EmptyState, SectionTitle } from "@/components/ui";
 
 const BATCH_SIZE = 30;
@@ -160,7 +160,31 @@ export function ExcelTab({
   const mappedCount = analysis
     ? STANDARD_MAPPING_FIELDS.filter((field) => analysis.mapping[field] !== null).length + (hasNameMapping ? 1 : 0)
     : 0;
+  const isUtilityColumn = (header: string, index: number) => {
+    if (!table) return false;
+    const trimmedHeader = header.trim();
+    const isSingleCharOrDigit = /^(\d|[A-Za-zА-Яа-я])$/.test(trimmedHeader);
+    if (!isSingleCharOrDigit) return false;
 
+    const dataRows = table.rows;
+    if (dataRows.length === 0) return true;
+    let nonEmptyCount = 0;
+    for (const row of dataRows) {
+      if (!isEmptyCell(row[index])) {
+        nonEmptyCount++;
+      }
+    }
+    const ratio = nonEmptyCount / dataRows.length;
+    if (ratio >= 0.3) return false;
+
+    const samples = sampleColumnValues(dataRows, index);
+    const matchesAnyHeuristic = Object.values(CONTENT_HEURISTICS).some(
+      (heuristic) => heuristic ? heuristic(samples) : false
+    );
+    if (matchesAnyHeuristic) return false;
+
+    return true;
+  };
   const updateColumnMapping = (field: MappableField, rawValue: string) => {
     const column = rawValue === "" ? null : Number(rawValue);
     setAnalysis((current) => {
@@ -744,9 +768,21 @@ export function ExcelTab({
                   <thead className="sticky top-0 z-10 bg-[#edf3f0] text-[#33423e]">
                     <tr>
                       <th className="w-14 border-b border-r border-[#d3ded9] px-3 py-2 text-center font-medium">#</th>
-                      {table.headers.map((header, index) => (
-                        <th className="min-w-40 border-b border-r border-[#d3ded9] px-3 py-2 font-semibold" key={`${header}-${index}`}>{header}</th>
-                      ))}
+                      {table.headers.map((header, index) => {
+                        const isUtil = isUtilityColumn(header, index);
+                        return (
+                          <th className="min-w-40 border-b border-r border-[#d3ded9] px-3 py-2 font-semibold" key={`${header}-${index}`}>
+                            <div className="flex flex-col gap-1 items-center justify-center text-center">
+                              <span>{header}</span>
+                              {isUtil && (
+                                <span className="inline-flex items-center rounded-full bg-[#f0f3f2] px-2 py-0.5 text-[10px] font-medium text-[#71807b] border border-[#d3ded9]">
+                                  служебная/мусорная
+                                </span>
+                              )}
+                            </div>
+                          </th>
+                        );
+                      })}
                     </tr>
                   </thead>
                   <tbody>
