@@ -23,6 +23,7 @@ const bodySchema = z.object({
     header: z.string(),
     values: z.array(z.string()).min(1).max(50),
   })).max(10).optional().default([]),
+  instruction: z.string().max(4000).optional().default(""),
 });
 
 export async function POST(request: Request) {
@@ -43,6 +44,9 @@ export async function POST(request: Request) {
             body.categoryColumns.length > 0
               ? `\nНа основе поля topic каждой записи классифицируй её по производным колонкам. В categories ключом должен быть номер column как строка, а значением — ровно одно значение из соответствующего списка. Верни все перечисленные колонки для каждой записи:\n${body.categoryColumns.map(({ column, header, values }) => `- categories["${column}"] для «${header}»: [${values.map((v) => `«${v}»`).join(", ")}]`).join("\n")}`
               : "\nДля каждой записи верни categories: {}.",
+            body.instruction.trim()
+              ? `\nСправочная инструкция от оператора: ${body.instruction.trim()}.\nПрименяй её ТОЛЬКО к полю address и только так: если в адресе отсутствует населённый пункт, а улица по инструкции однозначно относится к одному населённому пункту — допиши его в начало адреса (формат: населённый пункт, улица, дом). Улицу, номер дома и квартиру не менять. Если улица есть в нескольких населённых пунктах или в инструкции её нет — оставь адрес как есть. Остальные поля инструкция не меняет. Дописывать можно только населённый пункт, взятый из инструкции, ничего больше.`
+              : "",
           ].join(""),
         },
         { role: "user", content: JSON.stringify(body) },

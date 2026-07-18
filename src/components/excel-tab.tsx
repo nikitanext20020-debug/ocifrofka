@@ -429,7 +429,7 @@ export function ExcelTab({
             timeoutSeconds: settings.agentTimeout ?? 60,
             path: "/api/table/insert",
             method: "POST",
-            body: JSON.stringify({ records: batch, formats: analysis.formats, categoricals: fieldCategoricals, categoryColumns }),
+            body: JSON.stringify({ records: batch, formats: analysis.formats, categoricals: fieldCategoricals, categoryColumns, ...(instruction.trim() ? { instruction: instruction.trim() } : {}) }),
             area: "Excel",
             action: "Подготовка распознанных записей",
             fetcher: (input, init) => loggedFetch(input, init, {
