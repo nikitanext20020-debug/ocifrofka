@@ -256,6 +256,7 @@ export function appendRecords(
   table: TableData,
   records: Array<Record<RecordField, string>>,
   mapping: ColumnMapping,
+  forbiddenColumns?: Set<number>,
 ) {
   const added = records.map((record) => {
     const row = Array.from({ length: table.headers.length }, () => "");
@@ -265,6 +266,7 @@ export function appendRecords(
       if (
         column !== null &&
         column < row.length &&
+        !forbiddenColumns?.has(column) &&
         !String(row[column] ?? "").trim()
       ) {
         row[column] = values[field];
@@ -275,7 +277,12 @@ export function appendRecords(
   return { ...table, rows: [...table.rows, ...added] };
 }
 
-export function mergeGeneratedRowsAt(table: TableData, generatedRows: string[][], insertRowIndex: number) {
+export function mergeGeneratedRowsAt(
+  table: TableData,
+  generatedRows: string[][],
+  insertRowIndex: number,
+  forbiddenColumns?: Set<number>,
+) {
   const next = table.rows.map((row) => [...row]);
   const writtenRows: number[] = [];
   const applied: CellChange[] = [];
@@ -287,7 +294,7 @@ export function mergeGeneratedRowsAt(table: TableData, generatedRows: string[][]
     const target = next[rowIndex];
     const appliedBefore = applied.length;
     generated.slice(0, table.headers.length).forEach((value, column) => {
-      if (!value.trim() || !isEmptyCell(target[column])) return;
+      if (!value.trim() || !isEmptyCell(target[column]) || forbiddenColumns?.has(column)) return;
       target[column] = value;
       applied.push({ row: rowIndex, column, value });
     });
@@ -406,6 +413,7 @@ export function mergeRecordsAt(
   records: Array<Record<RecordField, string>>,
   mapping: ColumnMapping,
   insertRowIndex: number,
+  forbiddenColumns?: Set<number>,
 ): { rows: unknown[][]; writtenRows: number[] } {
   const next = table.rows.map((row) => [...row]);
   const writtenRows: number[] = [];
@@ -418,6 +426,7 @@ export function mergeRecordsAt(
     for (const field of MAPPABLE_FIELDS) {
       const col = mapping[field];
       if (col === null || col >= (next[rowIndex]?.length ?? 0)) continue;
+      if (forbiddenColumns?.has(col)) continue;
       if (isEmptyCell(next[rowIndex][col])) {
         next[rowIndex][col] = values[field];
       }

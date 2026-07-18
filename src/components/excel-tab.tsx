@@ -185,6 +185,18 @@ export function ExcelTab({
 
     return true;
   };
+  // Set of column indices that are junk/service columns — must never be mapping
+  // targets and must never be written to by generate/insert/fill-gaps.
+  const junkColumns = useMemo<Set<number>>(() => {
+    if (!table) return new Set();
+    return new Set(
+      table.headers
+        .map((header, index) => (isUtilityColumn(header, index) ? index : -1))
+        .filter((i) => i >= 0),
+    );
+    // isUtilityColumn depends on table, so this is correct.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [table]);
   const updateColumnMapping = (field: MappableField, rawValue: string) => {
     const column = rawValue === "" ? null : Number(rawValue);
     setAnalysis((current) => {
@@ -357,7 +369,17 @@ export function ExcelTab({
           categoricals[colIndex] = [...valueSet].sort();
         }
       });
-      const fullResult: TableAnalysis = { ...result, categoricals, conflicts: result.conflicts };
+      // Strip any mapping entries that point to junk/service columns so they
+      // cannot become write targets later. junkColumns is computed from the
+      // current table at render time and is therefore always up-to-date.
+      const cleanMapping = { ...result.mapping } as ColumnMapping;
+      for (const field of Object.keys(cleanMapping) as Array<keyof ColumnMapping>) {
+        const col = cleanMapping[field];
+        if (col !== null && col !== undefined && junkColumns.has(col)) {
+          cleanMapping[field] = null;
+        }
+      }
+      const fullResult: TableAnalysis = { ...result, mapping: cleanMapping, categoricals, conflicts: result.conflicts };
       setAnalysis(fullResult);
       const suggestedDefaults: Record<number, string> = {};
       for (const [rawColumn, values] of Object.entries(categoricals)) {
@@ -369,7 +391,7 @@ export function ExcelTab({
         else if (header.startsWith("вовлеченность в деятельность партии") && other) suggestedDefaults[column] = other;
       }
       setCategoricalDefaults(suggestedDefaults);
-      setInsertRow(findInsertRow(table, result.mapping));
+      setInsertRow(findInsertRow(table, cleanMapping));
       toast.success("Структура таблицы определена");
     } catch (error) {
       logAppError("Excel", error, { action: "Анализ структуры таблицы", columnCount: table.headers.length });
@@ -407,7 +429,7 @@ export function ExcelTab({
             timeoutSeconds: settings.agentTimeout ?? 60,
             path: "/api/table/insert",
             method: "POST",
-            body: JSON.stringify({ records: batch, formats: analysis.formats, categoricals: fieldCategoricals, categoryColumns }),
+            body: JSON.stringify({ records: batch, formats: analysis.formats, categoricals: fieldCategoricals, categoryColumns, ...(instruction.trim() ? { instruction: instruction.trim() } : {}) }),
             area: "Excel",
             action: "Подготовка распознанных записей",
             fetcher: (input, init) => loggedFetch(input, init, {
@@ -430,7 +452,7 @@ export function ExcelTab({
 
       const startIndex = insertRow ?? findInsertRow(table, analysis.mapping);
       pushSnapshot();
-      const { rows: mergedRows, writtenRows } = mergeRecordsAt(table, normalized, analysis.mapping, startIndex);
+      const { rows: mergedRows, writtenRows } = mergeRecordsAt(table, normalized, analysis.mapping, startIndex, junkColumns);
       const categorized = applyRecordCategories(mergedRows, writtenRows, normalized);
       const fixed = applyFixedColumnValues(categorized.rows, writtenRows, categoricalDefaults);
       replaceActiveRows(fixed.rows);
@@ -663,7 +685,7 @@ export function ExcelTab({
       });
       const result = await readApiResponse<{ rows: string[][]; warning?: string }>(response);
 
-      const merged = mergeGeneratedRowsAt(table, result.rows, startIndex);
+      const merged = mergeGeneratedRowsAt(table, result.rows, startIndex, junkColumns);
       if (!merged.applied.length) {
         throw new Error("Модель вернула строки, но ни одно значение не попало в свободные ячейки. Проверьте строку начала вставки.");
       }
