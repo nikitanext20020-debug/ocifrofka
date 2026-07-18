@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bot,
   ChevronLeft,
@@ -45,6 +45,7 @@ import {
   type TableAnalysis,
   type TableSnapshot,
   type WorkbookData,
+  type TableData,
 } from "@/lib/types";
 import { clone, cn, readApiResponse } from "@/lib/utils";
 
@@ -145,6 +146,38 @@ export function ExcelTab({
   const [busy, setBusy] = useState<BusyAction>(null);
   const [tablePage, setTablePage] = useState(0);
 
+  // Autopilot states and configuration
+  const [hideUtilityColumns, setHideUtilityColumns] = useState(false);
+  const [autopilotRowsPerCycle, setAutopilotRowsPerCycle] = useLocalStorage<number>("autopilot-rows-per-cycle", 10);
+  const [autopilotIntervalMinutes, setAutopilotIntervalMinutes] = useLocalStorage<number>("autopilot-interval-minutes", 5);
+  const [autopilotMaxRowsTotal, setAutopilotMaxRowsTotal] = useLocalStorage<string>("autopilot-max-rows-total", "");
+
+  const [autopilotIsActive, setAutopilotIsActive] = useState(false);
+  const [autopilotCreatedSession, setAutopilotCreatedSession] = useState(0);
+  const [autopilotLastStatus, setAutopilotLastStatus] = useState<string>("Не запускался");
+  const [autopilotCountdown, setAutopilotCountdown] = useState<number | null>(null);
+  const [autopilotLogs, setAutopilotLogs] = useState<Array<{ time: string; msg: string; type: "info" | "success" | "error" }>>([]);
+
+  const autopilotErrorsCountRef = useRef(0);
+  const autopilotRunningRef = useRef(false);
+  const countdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Keep a ref to the latest state because interval tick runs in closure space
+  const stateRef = useRef({
+    table: null as TableData | null,
+    analysis: null as TableAnalysis | null,
+    insertRow: null as number | null,
+    syntheticRows: [] as number[],
+    categoricalDefaults: {} as Record<number, string>,
+    marks: {} as CellMarks,
+    newRows: [] as number[],
+    generationInstruction: "",
+    instruction: "",
+    generationCount: 10,
+    maxRows: "",
+    junkColumns: new Set<number>(),
+  });
+
   const table = workbook ? workbook.sheets[workbook.activeSheet] : null;
   const tablePageCount = Math.max(1, Math.ceil((table?.rows.length ?? 0) / TABLE_PAGE_SIZE));
   const activeTablePage = Math.min(tablePage, tablePageCount - 1);
@@ -197,6 +230,23 @@ export function ExcelTab({
     // isUtilityColumn depends on table, so this is correct.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [table]);
+
+  useEffect(() => {
+    stateRef.current = {
+      table,
+      analysis,
+      insertRow,
+      syntheticRows,
+      categoricalDefaults,
+      marks,
+      newRows,
+      generationInstruction,
+      instruction,
+      generationCount: autopilotRowsPerCycle,
+      maxRows: autopilotMaxRowsTotal,
+      junkColumns,
+    };
+  }, [table, analysis, insertRow, syntheticRows, categoricalDefaults, marks, newRows, generationInstruction, instruction, autopilotRowsPerCycle, autopilotMaxRowsTotal, junkColumns]);
   const updateColumnMapping = (field: MappableField, rawValue: string) => {
     const column = rawValue === "" ? null : Number(rawValue);
     setAnalysis((current) => {
@@ -483,25 +533,106 @@ export function ExcelTab({
     }
   };
 
-  const fillGaps = async () => {
-    if (!table || !analysis) return;
-    if (!newRows.length) {
-      toast.info("Сначала занесите новые строки из распознавания");
-      return;
+  const generateStep = async (
+    currentTable: TableData,
+    currentAnalysis: TableAnalysis,
+    currentInsertRow: number | null,
+    currentSyntheticRows: number[],
+    currentCategoricalDefaults: Record<number, string>,
+    count: number,
+    currentJunkColumns: Set<number>,
+    instructionText: string,
+  ) => {
+    const examples = currentTable.rows
+      .filter((row: any, rowIndex: number) => (
+        !currentSyntheticRows.includes(rowIndex)
+        && row.filter((value: any) => String(value ?? "").trim()).length >= Math.min(3, currentTable.headers.length)
+      ))
+      .slice(0, 20);
+    const categoricals = Object.fromEntries(
+      Object.entries(currentAnalysis.categoricals)
+        .filter(([rawColumn]) => isGeneratorCategoricalHeader(currentTable.headers[Number(rawColumn)] ?? ""))
+        .map(([rawColumn, values]) => [currentTable.headers[Number(rawColumn)], values] as const)
+        .filter(([header]) => Boolean(header)),
+    );
+    const fixedValues = Object.fromEntries(
+      Object.entries(currentCategoricalDefaults)
+        .map(([rawColumn, value]) => [currentTable.headers[Number(rawColumn)], value] as const)
+        .filter(([header, value]) => Boolean(header && value)),
+    );
+    const startIndex = currentInsertRow ?? findInsertRow(currentTable, currentAnalysis.mapping);
+    const topicCol = currentAnalysis.mapping.topic;
+    const forbiddenTexts = topicCol !== null
+      ? currentTable.rows.slice(-200).map((row) => String(row[topicCol] ?? "").trim()).filter(Boolean)
+      : [];
+    const response = await fetchWithFailover({
+      agents: settings.tableAgents,
+      activeAgentId: settings.activeTableAgentId,
+      timeoutSeconds: settings.agentTimeout ?? 60,
+      path: "/api/table/generate",
+      method: "POST",
+      body: JSON.stringify({
+        count,
+        headers: currentTable.headers,
+        examples,
+        formats: currentAnalysis.formats,
+        categoricals,
+        fixedValues,
+        instruction: instructionText.trim(),
+        sequenceStart: startIndex,
+        forbiddenTexts,
+      }),
+      area: "Генератор",
+      action: "Создание синтетических строк",
+      fetcher: (input, init) => loggedFetch(input, init, {
+        area: "Генератор",
+        action: "Создание синтетических строк",
+        details: { requestedCount: count, columnCount: currentTable.headers.length },
+      }),
+    });
+    const result = await readApiResponse<{ rows: string[][]; warning?: string }>(response);
+
+    const merged = mergeGeneratedRowsAt(currentTable, result.rows, startIndex, currentJunkColumns);
+    if (!merged.applied.length) {
+      throw new Error("Модель вернула строки, но ни одно значение не попало в свободные ячейки. Проверьте строку начала вставки.");
     }
-    const fixed = applyFixedColumnValues(table.rows, newRows, categoricalDefaults);
-    const workingTable = { ...table, rows: fixed.rows };
-    const gaps = findGapCells(workingTable, analysis.mapping, newRows);
+    const fixed = applyFixedColumnValues(merged.rows, merged.writtenRows, currentCategoricalDefaults);
+    const allApplied = [...merged.applied, ...fixed.applied];
+
+    return {
+      updatedRows: fixed.rows,
+      writtenRows: merged.writtenRows,
+      appliedChanges: allApplied,
+      warning: result.warning,
+    };
+  };
+
+  const fillGapsStep = async (
+    currentTable: TableData,
+    currentAnalysis: TableAnalysis,
+    currentNewRows: number[],
+    currentCategoricalDefaults: Record<number, string>,
+    currentMarks: CellMarks,
+    currentSyntheticRows: number[],
+    instructionText: string,
+  ) => {
+    const fixed = applyFixedColumnValues(currentTable.rows, currentNewRows, currentCategoricalDefaults);
+    const workingTable = { ...currentTable, rows: fixed.rows };
+    const gaps = findGapCells(workingTable, currentAnalysis.mapping, currentNewRows);
     if (!gaps.length) {
-      if (fixed.applied.length) {
-        pushSnapshot();
-        replaceActiveRows(fixed.rows);
-        setNotice(`В новых строках применено фиксированных значений: ${fixed.applied.length}`);
-        toast.success(`Заполнено фиксированных значений: ${fixed.applied.length}`);
-      } else {
-        toast.info("В новых строках нет пропусков в замаппированных колонках");
-      }
-      return;
+      return {
+        updatedRows: fixed.rows,
+        appliedChanges: fixed.applied,
+        phoneFixChanges: [],
+        modelApplied: [],
+        newMarks: currentMarks,
+        syntheticRowsToAdd: [],
+        filledCount: 0,
+        fixablePhonesCount: 0,
+        invalidPhonesCount: 0,
+        modelAppliedCount: 0,
+        warnings: [],
+      };
     }
 
     const fixablePhones = gaps.filter((g) => g.phoneStatus === "fixable");
@@ -517,112 +648,146 @@ export function ExcelTab({
     if (!modelGaps.length) {
       const finalGapsSet = new Set(fixablePhones.map(({ row, column }) => `${row}:${column}`));
       const applied = applyCellChanges(workingTable.rows, phoneFixChanges, finalGapsSet);
-      pushSnapshot();
-      replaceActiveRows(applied.rows);
 
-      const nextMarks = { ...marks };
+      const nextMarks = { ...currentMarks };
       applied.applied.forEach((change) => {
         nextMarks[`${change.row}:${change.column}`] = "generated";
       });
       invalidPhones.forEach((g) => {
         nextMarks[`${g.row}:${g.column}`] = "phone-invalid";
       });
-      setMarks(nextMarks);
 
-      const msg = `Исправлено форматирование: ${fixablePhones.length} номеров, требуют проверки: ${invalidPhones.length}`;
-      setNotice(msg);
-      toast.success(msg);
-      return;
+      return {
+        updatedRows: applied.rows,
+        appliedChanges: [...fixed.applied, ...applied.applied],
+        phoneFixChanges,
+        modelApplied: [],
+        newMarks: nextMarks,
+        syntheticRowsToAdd: [],
+        filledCount: applied.applied.length,
+        fixablePhonesCount: fixablePhones.length,
+        invalidPhonesCount: invalidPhones.length,
+        modelAppliedCount: 0,
+        warnings: [],
+      };
     }
 
-    setBusy("gaps");
-    try {
-      // Build column-header-level categoricals for fill-gaps prompt
-      const columnCategoricals: Record<string, string[]> = {};
-      for (const [colIdx, values] of Object.entries(analysis.categoricals)) {
-        const headerName = table.headers[Number(colIdx)];
-        if (headerName && isDerivedCategoryHeader(headerName)) columnCategoricals[headerName] = values;
-      }
-      const examples = workingTable.rows
-        .filter((row) => Object.values(analysis.mapping).every((column) => column === null || String(row[column] ?? "").trim()))
-        .slice(0, 10);
-      const groupedRows = [...new Set(modelGaps.map(({ row }) => row))];
-      const tasks: Array<() => Promise<CellChange[]>> = [];
-      const batchWarnings: string[] = [];
-      for (let start = 0; start < groupedRows.length; start += BATCH_SIZE) {
-        const rowIndexes = groupedRows.slice(start, start + BATCH_SIZE);
-        const rowSet = new Set(rowIndexes);
-        const batchGaps = modelGaps.filter(({ row }) => rowSet.has(row));
-        tasks.push(async () => {
-          const response = await fetchWithFailover({
-            agents: settings.tableAgents,
-            activeAgentId: settings.activeTableAgentId,
-            timeoutSeconds: settings.agentTimeout ?? 60,
-            path: "/api/table/fill-gaps",
-            method: "POST",
-            body: JSON.stringify({
-              headers: table.headers,
-              rows: rowIndexes.map((row) => ({ row, values: workingTable.rows[row] })),
-              gaps: batchGaps,
-              examples,
-              formats: analysis.formats,
-              categoricals: columnCategoricals,
-              instruction: instruction.trim(),
-            }),
+    const columnCategoricals: Record<string, string[]> = {};
+    for (const [colIdx, values] of Object.entries(currentAnalysis.categoricals)) {
+      const headerName = currentTable.headers[Number(colIdx)];
+      if (headerName && isDerivedCategoryHeader(headerName)) columnCategoricals[headerName] = values;
+    }
+    const examples = workingTable.rows
+      .filter((row: any) => Object.values(currentAnalysis.mapping).every((column: any) => column === null || String(row[column] ?? "").trim()))
+      .slice(0, 10);
+    const groupedRows = [...new Set(modelGaps.map(({ row }) => row))];
+    const tasks: Array<() => Promise<CellChange[]>> = [];
+    const batchWarnings: string[] = [];
+    for (let start = 0; start < groupedRows.length; start += BATCH_SIZE) {
+      const rowIndexes = groupedRows.slice(start, start + BATCH_SIZE);
+      const rowSet = new Set(rowIndexes);
+      const batchGaps = modelGaps.filter(({ row }) => rowSet.has(row));
+      tasks.push(async () => {
+        const response = await fetchWithFailover({
+          agents: settings.tableAgents,
+          activeAgentId: settings.activeTableAgentId,
+          timeoutSeconds: settings.agentTimeout ?? 60,
+          path: "/api/table/fill-gaps",
+          method: "POST",
+          body: JSON.stringify({
+            headers: currentTable.headers,
+            rows: rowIndexes.map((row) => ({ row, values: workingTable.rows[row] })),
+            gaps: batchGaps,
+            examples,
+            formats: currentAnalysis.formats,
+            categoricals: columnCategoricals,
+            instruction: instructionText.trim(),
+          }),
+          area: "Excel",
+          action: "Заполнение пропусков",
+          fetcher: (input, init) => loggedFetch(input, init, {
             area: "Excel",
             action: "Заполнение пропусков",
-            fetcher: (input, init) => loggedFetch(input, init, {
-              area: "Excel",
-              action: "Заполнение пропусков",
-              details: { requestedCount: batchGaps.length },
-            }),
-          });
-          const result = await readApiResponse<{ changes: CellChange[]; missing?: number; warning?: string }>(response);
-          if (result.warning) batchWarnings.push(result.warning);
-          else if (result.missing) batchWarnings.push(`Не заполнено ячеек: ${result.missing}.`);
-          return result.changes;
+            details: { requestedCount: batchGaps.length },
+          }),
         });
-      }
-      const { results: changes, errors } = await runBatches(tasks);
-      const allChanges = [...changes, ...phoneFixChanges];
-      const allowed = new Set([
-        ...modelGaps.map(({ row, column }) => `${row}:${column}`),
-        ...fixablePhones.map(({ row, column }) => `${row}:${column}`),
-      ]);
-      const applied = applyCellChanges(workingTable.rows, allChanges, allowed);
-      if (!applied.applied.length && !fixed.applied.length && !phoneFixChanges.length) {
-        throw errors[0] ?? new Error("Модель не предложила значений для пропусков");
-      }
-      if (errors.length) {
-        toast.warning(`Часть батчей не обработана (${errors.length}). Нажмите «Дополнить пропуски» ещё раз для оставшихся ячеек.`);
-      }
-      if (batchWarnings.length) toast.warning([...new Set(batchWarnings)].join(" "));
-      pushSnapshot();
-      replaceActiveRows(applied.rows);
-
-      const nextMarks = { ...marks };
-      applied.applied.forEach(({ row, column }) => {
-        nextMarks[`${row}:${column}`] = "generated";
+        const result = await readApiResponse<{ changes: CellChange[]; missing?: number; warning?: string }>(response);
+        if (result.warning) batchWarnings.push(result.warning);
+        return result.changes;
       });
-      invalidPhones.forEach((g) => {
-        nextMarks[`${g.row}:${g.column}`] = "phone-invalid";
-      });
-      setMarks(nextMarks);
+    }
+    const { results: changes, errors } = await runBatches(tasks);
+    const allChanges = [...changes, ...phoneFixChanges];
+    const allowed = new Set([
+      ...modelGaps.map(({ row, column }) => `${row}:${column}`),
+      ...fixablePhones.map(({ row, column }) => `${row}:${column}`),
+    ]);
+    const applied = applyCellChanges(workingTable.rows, allChanges, allowed);
+    if (!applied.applied.length && !fixed.applied.length && !phoneFixChanges.length) {
+      throw errors[0] ?? new Error("Модель не предложила значений для пропусков");
+    }
 
-      const modelApplied = applied.applied.filter(
-        (ch) => !phoneFixChanges.some((p) => p.row === ch.row && p.column === ch.column),
+    const nextMarks = { ...currentMarks };
+    applied.applied.forEach(({ row, column }) => {
+      nextMarks[`${row}:${column}`] = "generated";
+    });
+    invalidPhones.forEach((g) => {
+      nextMarks[`${g.row}:${g.column}`] = "phone-invalid";
+    });
+
+    const modelApplied = applied.applied.filter(
+      (ch) => !phoneFixChanges.some((p) => p.row === ch.row && p.column === ch.column),
+    );
+
+    return {
+      updatedRows: applied.rows,
+      appliedChanges: [...fixed.applied, ...applied.applied],
+      phoneFixChanges,
+      modelApplied,
+      newMarks: nextMarks,
+      syntheticRowsToAdd: modelApplied.map(({ row }) => row),
+      filledCount: applied.applied.length,
+      fixablePhonesCount: fixablePhones.length,
+      invalidPhonesCount: invalidPhones.length,
+      modelAppliedCount: modelApplied.length,
+      warnings: batchWarnings,
+    };
+  };
+
+  const fillGaps = async () => {
+    if (!table || !analysis) return;
+    if (!newRows.length) {
+      toast.info("Сначала занесите новые строки из распознавания");
+      return;
+    }
+    setBusy("gaps");
+    try {
+      const step = await fillGapsStep(
+        table,
+        analysis,
+        newRows,
+        categoricalDefaults,
+        marks,
+        syntheticRows,
+        instruction,
       );
-      setSyntheticRows((current) => [...new Set([...current, ...modelApplied.map(({ row }) => row)])]);
 
-      const fixCount = fixablePhones.length;
-      const invalidCount = invalidPhones.length;
-      const modelCount = modelApplied.length;
+      if (step.filledCount === 0 && step.appliedChanges.length === 0) {
+        toast.info("В новых строках нет пропусков в замаппированных колонках");
+        return;
+      }
 
-      const noticeMsg = `В новых строках сгенерировано значений: ${modelCount}. Исправлено форматирование: ${fixCount} номеров, требуют проверки: ${invalidCount}.`;
+      pushSnapshot();
+      replaceActiveRows(step.updatedRows);
+      setMarks(step.newMarks);
+      setSyntheticRows((current) => [...new Set([...current, ...step.syntheticRowsToAdd])]);
+
+      const noticeMsg = `В новых строках сгенерировано значений: ${step.modelAppliedCount}. Исправлено форматирование: ${step.fixablePhonesCount} номеров, требуют проверки: ${step.invalidPhonesCount}.`;
       setNotice(noticeMsg);
-      toast.success(`Заполнено ячеек: ${applied.applied.length}`);
+      toast.success(`Заполнено ячеек: ${step.filledCount}`);
+      if (step.warnings.length) toast.warning([...new Set(step.warnings)].join(" "));
     } catch (error) {
-      logAppError("Excel", error, { action: "Заполнение пропусков", requestedCount: gaps.length });
+      logAppError("Excel", error, { action: "Заполнение пропусков", requestedCount: newRows.length });
       toast.error(error instanceof Error ? error.message : "Не удалось заполнить пропуски");
     } finally {
       setBusy(null);
@@ -636,71 +801,27 @@ export function ExcelTab({
       : 1;
     setBusy("generate");
     try {
-      const examples = table.rows
-        .filter((row, rowIndex) => (
-          !syntheticRows.includes(rowIndex)
-          && row.filter((value) => String(value ?? "").trim()).length >= Math.min(3, table.headers.length)
-        ))
-        .slice(0, 20);
-      const categoricals = Object.fromEntries(
-        Object.entries(analysis.categoricals)
-          .filter(([rawColumn]) => isGeneratorCategoricalHeader(table.headers[Number(rawColumn)] ?? ""))
-          .map(([rawColumn, values]) => [table.headers[Number(rawColumn)], values] as const)
-          .filter(([header]) => Boolean(header)),
+      const step = await generateStep(
+        table,
+        analysis,
+        insertRow,
+        syntheticRows,
+        categoricalDefaults,
+        count,
+        junkColumns,
+        generationInstruction,
       );
-      const fixedValues = Object.fromEntries(
-        Object.entries(categoricalDefaults)
-          .map(([rawColumn, value]) => [table.headers[Number(rawColumn)], value] as const)
-          .filter(([header, value]) => Boolean(header && value)),
-      );
-      const startIndex = insertRow ?? findInsertRow(table, analysis.mapping);
-      const topicCol = analysis.mapping.topic;
-      const forbiddenTexts = topicCol !== null
-        ? table.rows.slice(-200).map((row) => String(row[topicCol] ?? "").trim()).filter(Boolean)
-        : [];
-      const response = await fetchWithFailover({
-        agents: settings.tableAgents,
-        activeAgentId: settings.activeTableAgentId,
-        timeoutSeconds: settings.agentTimeout ?? 60,
-        path: "/api/table/generate",
-        method: "POST",
-        body: JSON.stringify({
-          count,
-          headers: table.headers,
-          examples,
-          formats: analysis.formats,
-          categoricals,
-          fixedValues,
-          instruction: generationInstruction.trim(),
-          sequenceStart: startIndex,
-          forbiddenTexts,
-        }),
-        area: "Генератор",
-        action: "Создание синтетических строк",
-        fetcher: (input, init) => loggedFetch(input, init, {
-          area: "Генератор",
-          action: "Создание синтетических строк",
-          details: { requestedCount: count, columnCount: table.headers.length },
-        }),
-      });
-      const result = await readApiResponse<{ rows: string[][]; warning?: string }>(response);
 
-      const merged = mergeGeneratedRowsAt(table, result.rows, startIndex, junkColumns);
-      if (!merged.applied.length) {
-        throw new Error("Модель вернула строки, но ни одно значение не попало в свободные ячейки. Проверьте строку начала вставки.");
-      }
-      const fixed = applyFixedColumnValues(merged.rows, merged.writtenRows, categoricalDefaults);
-      const allApplied = [...merged.applied, ...fixed.applied];
       pushSnapshot();
-      replaceActiveRows(fixed.rows);
-      setNewRows(merged.writtenRows);
-      setSyntheticRows((current) => [...new Set([...current, ...merged.writtenRows])]);
-      setMarks(Object.fromEntries(allApplied.map(({ row, column }) => [`${row}:${column}`, "generated"] as const)));
-      setInsertRow(Math.max(...merged.writtenRows) + 1);
-      if (merged.writtenRows.length) showTablePage(Math.floor(merged.writtenRows[0] / TABLE_PAGE_SIZE));
-      setNotice(`Создано синтетических тестовых строк: ${merged.writtenRows.length}. При скачивании они будут явно помечены.`);
-      toast.success(`Создано тестовых строк: ${merged.writtenRows.length}`);
-      if (result.warning) toast.warning(result.warning);
+      replaceActiveRows(step.updatedRows);
+      setNewRows(step.writtenRows);
+      setSyntheticRows((current) => [...new Set([...current, ...step.writtenRows])]);
+      setMarks(Object.fromEntries(step.appliedChanges.map(({ row, column }) => [`${row}:${column}`, "generated"] as const)));
+      setInsertRow(Math.max(...step.writtenRows) + 1);
+      if (step.writtenRows.length) showTablePage(Math.floor(step.writtenRows[0] / TABLE_PAGE_SIZE));
+      setNotice(`Создано синтетических тестовых строк: ${step.writtenRows.length}. При скачивании они будут явно помечены.`);
+      toast.success(`Создано тестовых строк: ${step.writtenRows.length}`);
+      if (step.warning) toast.warning(step.warning);
     } catch (error) {
       logAppError("Генератор", error, { action: "Создание синтетических строк", requestedCount: count });
       toast.error(error instanceof Error ? error.message : "Не удалось создать тестовые строки");
@@ -708,6 +829,221 @@ export function ExcelTab({
       setBusy(null);
     }
   };
+
+  const addAutopilotLog = (msg: string, type: "info" | "success" | "error" = "info") => {
+    const timeStr = new Date().toLocaleTimeString("ru-RU");
+    setAutopilotLogs((prev) => [
+      { time: timeStr, msg, type },
+      ...prev.slice(0, 99),
+    ]);
+  };
+
+  const stopAutopilot = (reason?: string) => {
+    setAutopilotIsActive(false);
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
+    }
+    setAutopilotCountdown(null);
+    const msg = reason ? `Автопилот остановлен: ${reason}` : "Автопилот остановлен";
+    addAutopilotLog(msg, "info");
+    toast.info(msg);
+  };
+
+  const handleCycleError = (msg: string) => {
+    autopilotErrorsCountRef.current += 1;
+    setAutopilotLastStatus(`Ошибка: ${msg}`);
+    addAutopilotLog(`Ошибка: ${msg}`, "error");
+
+    if (autopilotErrorsCountRef.current >= 3) {
+      stopAutopilot(`Превышено число ошибок подряд (3). Последняя ошибка: ${msg}`);
+    }
+    autopilotRunningRef.current = false;
+  };
+
+  const executeAutopilotCycle = async () => {
+    if (autopilotRunningRef.current || busy !== null) {
+      addAutopilotLog("Пропуск тика: идет выполнение другой операции или цикла", "info");
+      return;
+    }
+
+    const {
+      table: currentTable,
+      analysis: currentAnalysis,
+      insertRow: currentInsertRow,
+      syntheticRows: currentSyntheticRows,
+      categoricalDefaults: currentCategoricalDefaults,
+      marks: currentMarks,
+      generationInstruction: currentGenInstruction,
+      instruction: currentInstruction,
+      generationCount: currentGenCount,
+      maxRows: currentMaxRows,
+      junkColumns: currentJunkColumns,
+    } = stateRef.current;
+
+    if (!currentTable || !currentAnalysis) {
+      handleCycleError("Таблица не инициализирована или не проанализирована");
+      return;
+    }
+
+    // Check maximum rows total limit
+    const maxLimit = currentMaxRows.trim() ? parseInt(currentMaxRows, 10) : null;
+    if (maxLimit !== null && Number.isInteger(maxLimit)) {
+      if (currentTable.rows.length >= maxLimit) {
+        stopAutopilot("Достигнут лимит максимального количества строк всего");
+        return;
+      }
+    }
+
+    autopilotRunningRef.current = true;
+    addAutopilotLog("Запуск шага автопилота...", "info");
+
+    let genResult;
+    try {
+      const countToGen = maxLimit !== null
+        ? Math.min(currentGenCount, maxLimit - currentTable.rows.length)
+        : currentGenCount;
+
+      if (countToGen <= 0) {
+        stopAutopilot("Достигнут лимит максимального количества строк всего");
+        return;
+      }
+
+      addAutopilotLog(`1/2: Генерация синтетических строк (${countToGen} шт.)...`, "info");
+      genResult = await generateStep(
+        currentTable,
+        currentAnalysis,
+        currentInsertRow,
+        currentSyntheticRows,
+        currentCategoricalDefaults,
+        countToGen,
+        currentJunkColumns,
+        currentGenInstruction,
+      );
+      addAutopilotLog(`Генерация завершена. Вставлено строк: ${genResult.writtenRows.length}`, "info");
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      handleCycleError(`Ошибка генерации: ${msg}`);
+      return;
+    }
+
+    // Immediately trigger fill gaps
+    let gapsResult;
+    try {
+      addAutopilotLog("2/2: Автоматическое заполнение пропусков по инструкции...", "info");
+      const tempTable = { ...currentTable, rows: genResult.updatedRows };
+      gapsResult = await fillGapsStep(
+        tempTable,
+        currentAnalysis,
+        genResult.writtenRows,
+        currentCategoricalDefaults,
+        Object.fromEntries(genResult.appliedChanges.map(({ row, column }) => [`${row}:${column}`, "generated"] as const)),
+        [...currentSyntheticRows, ...genResult.writtenRows],
+        currentInstruction,
+      );
+      addAutopilotLog(`Заполнение пропусков завершено. Заполнено ячеек: ${gapsResult.filledCount}`, "info");
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+
+      // Even on fillGaps fail, commit generated rows!
+      pushSnapshot();
+      replaceActiveRows(genResult.updatedRows);
+      setNewRows(genResult.writtenRows);
+      setSyntheticRows((current) => [...new Set([...current, ...genResult.writtenRows])]);
+      setMarks((current) => ({
+        ...current,
+        ...Object.fromEntries(genResult.appliedChanges.map(({ row, column }) => [`${row}:${column}`, "generated"] as const)),
+      }));
+      setInsertRow(Math.max(...genResult.writtenRows) + 1);
+
+      setAutopilotCreatedSession((c) => c + genResult.writtenRows.length);
+      handleCycleError(`Строки созданы (${genResult.writtenRows.length}), но заполнение пропусков завершилось ошибкой: ${msg}`);
+      return;
+    }
+
+    // All successful! Commit both steps
+    pushSnapshot();
+    replaceActiveRows(gapsResult.updatedRows);
+    setNewRows(genResult.writtenRows);
+    setSyntheticRows((current) => [
+      ...new Set([...current, ...genResult.writtenRows, ...gapsResult.syntheticRowsToAdd]),
+    ]);
+    setMarks((current) => ({
+      ...current,
+      ...gapsResult.newMarks,
+    }));
+    setInsertRow(Math.max(...genResult.writtenRows) + 1);
+
+    setAutopilotCreatedSession((c) => c + genResult.writtenRows.length);
+    autopilotErrorsCountRef.current = 0; // reset consecutive errors
+
+    const statusMsg = `Успешно: создано строк = ${genResult.writtenRows.length}, заполнено пропусков = ${gapsResult.filledCount}`;
+    setAutopilotLastStatus(statusMsg);
+    addAutopilotLog(statusMsg, "success");
+
+    // Check if limit is reached now:
+    const newTotalRows = gapsResult.updatedRows.length;
+    if (maxLimit !== null && newTotalRows >= maxLimit) {
+      stopAutopilot("Достигнут лимит максимального количества строк всего");
+    }
+
+    autopilotRunningRef.current = false;
+  };
+
+  const startAutopilot = () => {
+    if (!table || !analysis) {
+      toast.error("Сначала проанализируйте таблицу");
+      return;
+    }
+
+    setAutopilotIsActive(true);
+    autopilotErrorsCountRef.current = 0;
+    setAutopilotCreatedSession(0);
+    setAutopilotLastStatus("Запущен");
+    setAutopilotLogs([]);
+    addAutopilotLog("Автопилот запущен", "info");
+
+    const totalSeconds = autopilotIntervalMinutes * 60;
+    setAutopilotCountdown(totalSeconds);
+
+    // Immediately execute first run
+    void executeAutopilotCycle();
+  };
+
+  useEffect(() => {
+    if (autopilotIsActive) {
+      const intervalSec = autopilotIntervalMinutes * 60;
+      setAutopilotCountdown(intervalSec);
+
+      countdownIntervalRef.current = setInterval(() => {
+        setAutopilotCountdown((prev) => {
+          if (prev === null) return null;
+          if (prev <= 1) {
+            if (!autopilotRunningRef.current && busy === null) {
+              void executeAutopilotCycle();
+            } else {
+              addAutopilotLog("Пропуск тика: предыдущий цикл или другая операция еще выполняются", "info");
+            }
+            return intervalSec;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    } else {
+      if (countdownIntervalRef.current) {
+        clearInterval(countdownIntervalRef.current);
+        countdownIntervalRef.current = null;
+      }
+      setAutopilotCountdown(null);
+    }
+
+    return () => {
+      if (countdownIntervalRef.current) {
+        clearInterval(countdownIntervalRef.current);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autopilotIsActive, autopilotIntervalMinutes]);
 
   const undo = () => {
     const snapshot = history.at(-1);
@@ -765,22 +1101,33 @@ export function ExcelTab({
                 <FileSpreadsheet className="size-5 text-[#287462]" />
                 <span className="max-w-64 truncate text-sm font-medium">{workbook.fileName}</span>
               </div>
-              {workbook.sheetOrder.length > 1 && (
-                <label className="flex items-center gap-2 text-sm">
-                  Лист
-                  <select
-                    className="h-9 rounded-md border border-[#cbd6d2] bg-white px-3"
-                    value={workbook.activeSheet}
-                    onChange={(event) => {
-                      setWorkbook({ ...workbook, activeSheet: event.target.value });
-                      setAnalysis(null); setInsertRow(null); setMarks({}); setNewRows([]); setSyntheticRows([]); setCategoricalDefaults({}); setInsertProgress(null); setHistory([]); setNotice(null);
-                      setTablePage(0);
-                    }}
-                  >
-                    {workbook.sheetOrder.map((name) => <option key={name}>{name}</option>)}
-                  </select>
+              <div className="flex items-center gap-4">
+                <label className="flex items-center gap-2 text-sm select-none cursor-pointer text-[#5e6c68]">
+                  <input
+                    type="checkbox"
+                    checked={hideUtilityColumns}
+                    onChange={(e) => setHideUtilityColumns(e.target.checked)}
+                    className="rounded border-[#cbd6d2] text-[#287462] focus:ring-[#287462]/15 focus:ring-2 size-4"
+                  />
+                  Скрыть служебные колонки
                 </label>
-              )}
+                {workbook.sheetOrder.length > 1 && (
+                  <label className="flex items-center gap-2 text-sm">
+                    Лист
+                    <select
+                      className="h-9 rounded-md border border-[#cbd6d2] bg-white px-3"
+                      value={workbook.activeSheet}
+                      onChange={(event) => {
+                        setWorkbook({ ...workbook, activeSheet: event.target.value });
+                        setAnalysis(null); setInsertRow(null); setMarks({}); setNewRows([]); setSyntheticRows([]); setCategoricalDefaults({}); setInsertProgress(null); setHistory([]); setNotice(null);
+                        setTablePage(0);
+                      }}
+                    >
+                      {workbook.sheetOrder.map((name) => <option key={name}>{name}</option>)}
+                    </select>
+                  </label>
+                )}
+              </div>
             </div>
             {table.headers.length === 0 ? (
               <EmptyState icon={<ListChecks className="size-8" />} title="Лист пуст" text="Выберите другой лист или загрузите файл с заголовками." />
@@ -792,6 +1139,7 @@ export function ExcelTab({
                       <th className="w-14 border-b border-r border-[#d3ded9] px-3 py-2 text-center font-medium">#</th>
                       {table.headers.map((header, index) => {
                         const isUtil = isUtilityColumn(header, index);
+                        if (hideUtilityColumns && isUtil) return null;
                         return (
                           <th className="min-w-40 border-b border-r border-[#d3ded9] px-3 py-2 font-semibold" key={`${header}-${index}`}>
                             <div className="flex flex-col gap-1 items-center justify-center text-center">
@@ -814,6 +1162,8 @@ export function ExcelTab({
                       <tr className={cn("border-b border-[#e5ebe8]", newRows.includes(rowIndex) && "bg-[#e8f7ee]")} key={rowIndex}>
                         <td className="border-r border-[#e0e7e4] px-3 py-2 text-center text-xs text-[#7b8985]">{rowIndex + (table?.headerRowIndex ?? 0) + 2}</td>
                          {table.headers.map((_, columnIndex) => {
+                          const isUtil = isUtilityColumn(table.headers[columnIndex] ?? "", columnIndex);
+                          if (hideUtilityColumns && isUtil) return null;
                           const mark = marks[`${rowIndex}:${columnIndex}`];
                           const digitsCount = (String(row[columnIndex] ?? "").replace(/\D/g, "")).length;
                           return (
@@ -903,6 +1253,121 @@ export function ExcelTab({
                   <span className="ml-1">Следующую партию начинайте со строки {insertProgress.endRow + 1}.</span>
                 </div>
               )}
+            </Card>
+          )}
+
+          {analysis && (
+            <Card className="p-5">
+              <SectionTitle
+                title="Автопилот генерации"
+                description="Регулярное автоматическое создание синтетических строк и заполнение пропусков в фоновом режиме."
+              />
+              <div className="mt-4 grid gap-4 sm:grid-cols-3">
+                <label className="block">
+                  <span className="mb-1.5 block text-sm font-medium text-[#33423e]">Создавать строк за цикл (1–50)</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={50}
+                    value={autopilotRowsPerCycle}
+                    onChange={(e) => {
+                      const val = Math.max(1, Math.min(50, Number(e.target.value) || 1));
+                      setAutopilotRowsPerCycle(val);
+                    }}
+                    disabled={autopilotIsActive}
+                    className="h-10 w-full rounded-md border border-[#cbd6d2] bg-white px-3 text-sm outline-none focus:border-[#23816e] focus:ring-2 focus:ring-[#23816e]/15 disabled:bg-[#f4f7f5]"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-1.5 block text-sm font-medium text-[#33423e]">Интервал, минут (1–120)</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={120}
+                    value={autopilotIntervalMinutes}
+                    onChange={(e) => {
+                      const val = Math.max(1, Math.min(120, Number(e.target.value) || 1));
+                      setAutopilotIntervalMinutes(val);
+                    }}
+                    disabled={autopilotIsActive}
+                    className="h-10 w-full rounded-md border border-[#cbd6d2] bg-white px-3 text-sm outline-none focus:border-[#23816e] focus:ring-2 focus:ring-[#23816e]/15 disabled:bg-[#f4f7f5]"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-1.5 block text-sm font-medium text-[#33423e]">Максимум строк всего (опционально)</span>
+                  <input
+                    type="number"
+                    placeholder="Без лимита"
+                    value={autopilotMaxRowsTotal}
+                    onChange={(e) => setAutopilotMaxRowsTotal(e.target.value)}
+                    disabled={autopilotIsActive}
+                    className="h-10 w-full rounded-md border border-[#cbd6d2] bg-white px-3 text-sm outline-none focus:border-[#23816e] focus:ring-2 focus:ring-[#23816e]/15 disabled:bg-[#f4f7f5]"
+                  />
+                </label>
+              </div>
+
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-4 border-t border-[#e0e8e5] pt-4">
+                <div className="flex items-center gap-2">
+                  {!autopilotIsActive ? (
+                    <Button onClick={startAutopilot} className="bg-[#287462] hover:bg-[#1e6958]">
+                      Запустить автопилот
+                    </Button>
+                  ) : (
+                    <Button onClick={() => stopAutopilot()} className="bg-red-600 hover:bg-red-700 text-white">
+                      Остановить автопилот
+                    </Button>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+                  <div>
+                    <span className="text-[#71807b]">До следующего цикла:</span>{" "}
+                    <span className="font-mono font-semibold text-[#192622]">
+                      {(() => {
+                        if (autopilotCountdown === null) return "--:--";
+                        const mins = Math.floor(autopilotCountdown / 60);
+                        const secs = autopilotCountdown % 60;
+                        return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+                      })()}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[#71807b]">Создано за сессию:</span>{" "}
+                    <span className="font-semibold text-[#192622]">{autopilotCreatedSession} строк</span>
+                  </div>
+                  <div className="max-w-xs truncate">
+                    <span className="text-[#71807b]">Последний статус:</span>{" "}
+                    <span className={cn(
+                      "font-medium",
+                      autopilotLastStatus.startsWith("Ошибка") ? "text-red-600" : "text-[#287462]"
+                    )}>
+                      {autopilotLastStatus}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4">
+                <span className="mb-2 block text-xs font-semibold uppercase tracking-wider text-[#71807b]">Логи работы автопилота</span>
+                <div className="max-h-40 overflow-y-auto rounded-md border border-[#d9e4e0] bg-[#f7faf8] p-3 font-mono text-xs space-y-1">
+                  {autopilotLogs.length === 0 ? (
+                    <div className="text-[#71807b] italic text-center py-2">Логов пока нет. Запустите автопилот для генерации.</div>
+                  ) : (
+                    autopilotLogs.map((log, i) => (
+                      <div key={i} className="flex gap-2">
+                        <span className="text-[#71807b] shrink-0">[{log.time}]</span>
+                        <span className={cn(
+                          log.type === "success" && "text-[#1e6958]",
+                          log.type === "error" && "text-red-600 font-semibold",
+                          log.type === "info" && "text-[#31567e]"
+                        )}>
+                          {log.msg}
+                        </span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
             </Card>
           )}
 
