@@ -58,12 +58,22 @@ function normalizeHeader(value: unknown) {
     .trim();
 }
 
-/** Returns up to `n` non-empty, non-dash column values from the data rows. */
-export function sampleColumnValues(rows: unknown[][], column: number, n = 20): string[] {
+/**
+ * Returns up to `n` non-empty, non-dash column values from the data rows.
+ * Rows whose index appears in `excludeRows` are skipped (used to exclude
+ * synthetic/generated rows from heuristic sampling).
+ */
+export function sampleColumnValues(
+  rows: unknown[][],
+  column: number,
+  n = 20,
+  excludeRows?: Set<number>,
+): string[] {
   const result: string[] = [];
-  for (const row of rows) {
+  for (let i = 0; i < rows.length; i++) {
     if (result.length >= n) break;
-    const value = String(row[column] ?? "").trim();
+    if (excludeRows?.has(i)) continue;
+    const value = String(rows[i][column] ?? "").trim();
     if (value && value !== "-") result.push(value);
   }
   return result;
@@ -148,14 +158,22 @@ export type MappingConflict = {
  * them. Some source workbooks have a technical first row (A, C, D...) and put
  * the descriptive headers in the next row, so that row is considered too.
  *
- * Content validation: if the header-matched column's values don't pass the
- * field heuristic, but another column's values do, the data-matching column
- * wins and the discrepancy is recorded as a conflict.
+ * Priority rules:
+ *  1. Header match always wins — if a column's header directly names the field
+ *     (e.g. «Адрес проживания» → address), that assignment is final. The
+ *     content heuristic can only confirm it, never override it.
+ *  2. Content heuristic can override a model-only assignment (no header match).
+ *  3. Junk/service columns (single-letter headers) are never assigned and any
+ *     existing assignment pointing to one is cleared.
+ *  4. Synthetic rows (those with «Синтетические данные» in the «Статус данных»
+ *     column) are excluded from content heuristic sampling so they cannot
+ *     corrupt the heuristic for future mapping decisions.
  */
 export function refineColumnMapping(
   headers: string[],
   rows: unknown[][],
   modelMapping: ColumnMapping,
+  junkColumns?: Set<number>,
 ): { mapping: ColumnMapping; conflicts: MappingConflict[] } {
   const mapping = { ...modelMapping };
   const embeddedHeaders = findEmbeddedHeaderRow(rows);
@@ -186,9 +204,39 @@ export function refineColumnMapping(
     for (const field of detectedNameParts) mapping[field] = null;
   }
 
+  // Clear any mapping that points to a junk/service column.
+  if (junkColumns?.size) {
+    for (const field of Object.keys(mapping) as MappableField[]) {
+      const col = mapping[field];
+      if (col !== null && col !== undefined && junkColumns.has(col)) {
+        mapping[field] = null;
+      }
+    }
+  }
+
+  // Determine which rows should be excluded from content heuristic sampling
+  // because they contain synthetic/generated data.
+  const statusColIndex = headers.findIndex(
+    (h) => normalizeHeader(h) === "статус данных",
+  );
+  const syntheticRowSet: Set<number> | undefined =
+    statusColIndex >= 0
+      ? new Set(
+          rows
+            .map((row, i) =>
+              String(row[statusColIndex] ?? "").trim() === "Синтетические данные" ? i : -1,
+            )
+            .filter((i) => i >= 0),
+        )
+      : undefined;
+
   // Content-based validation: for fields with a heuristic, check whether the
-  // header-assigned column actually contains expected data. If not, search for
-  // a better column among the remaining ones.
+  // header-assigned (or model-assigned) column actually contains expected data.
+  //
+  // KEY RULE: if the column was assigned via a header match (detected[field] is
+  // set), the heuristic can only confirm — it must NOT override to a different
+  // column. Override is allowed only when the assignment came from the model
+  // (no matching header was found).
   const conflicts: MappingConflict[] = [];
   const contentFields = ["address", "phone", "birth_date", "full_name"] as const;
   for (const field of contentFields) {
@@ -197,18 +245,24 @@ export function refineColumnMapping(
     const currentCol = mapping[field];
     if (currentCol === null || currentCol === undefined) continue;
 
-    const currentSamples = sampleColumnValues(rows, currentCol);
+    // If the column was assigned by a header match, preserve it unconditionally.
+    const assignedByHeader = detected[field] === currentCol;
+    if (assignedByHeader) continue;
+
+    const currentSamples = sampleColumnValues(rows, currentCol, 20, syntheticRowSet);
     if (currentSamples.length > 0 && heuristic(currentSamples)) continue; // already OK
 
-    // Header-matched column fails the heuristic — look for a better one.
+    // Model-assigned column fails the heuristic — look for a better one,
+    // but skip junk columns and columns already used by another field.
     const betterCol = headers.findIndex((_, colIdx) => {
       if (colIdx === currentCol) return false;
+      if (junkColumns?.has(colIdx)) return false;
       // Skip columns already assigned to another field.
       const alreadyUsed = (Object.values(mapping) as Array<number | null>).some(
         (v) => v === colIdx && v !== currentCol,
       );
       if (alreadyUsed) return false;
-      const samples = sampleColumnValues(rows, colIdx);
+      const samples = sampleColumnValues(rows, colIdx, 20, syntheticRowSet);
       return samples.length > 0 && heuristic(samples);
     });
 
@@ -273,8 +327,8 @@ function localFormats(mapping: ColumnMapping, rows: unknown[][]): Record<RecordF
 }
 
 /** Avoids a model request when descriptive headers fully identify the table. */
-export function analyzeTableDeterministically(headers: string[], rows: unknown[][]) {
-  const { mapping, conflicts } = refineColumnMapping(headers, rows, emptyMapping());
+export function analyzeTableDeterministically(headers: string[], rows: unknown[][], junkColumns?: Set<number>) {
+  const { mapping, conflicts } = refineColumnMapping(headers, rows, emptyMapping(), junkColumns);
   if (!hasCompleteCoreMapping(mapping)) return null;
   return { mapping, formats: localFormats(mapping, rows), conflicts };
 }
