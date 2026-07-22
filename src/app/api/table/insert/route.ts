@@ -23,12 +23,12 @@ const bodySchema = z.object({
     header: z.string(),
     values: z.array(z.string()).min(1).max(50),
   })).max(10).optional().default([]),
-  instruction: z.string().max(4000).optional().default(""),
+  instruction: z.string().max(20_000).optional().default(""),
 });
 
 export async function POST(request: Request) {
   try {
-    const config = readAgentConfig(request);
+    const config = readAgentConfig(request, "table");
     const body = bodySchema.parse(await request.json());
     const result = await callStructured({
       config,

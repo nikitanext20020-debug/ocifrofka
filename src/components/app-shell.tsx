@@ -1,13 +1,20 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { FileSpreadsheet, ScanLine, ScrollText, Settings2, ShieldCheck } from "lucide-react";
+import { AlertTriangle, FileSpreadsheet, ScanLine, ScrollText, Settings2, ShieldCheck } from "lucide-react";
 import { Toaster, toast } from "sonner";
 import { DEFAULT_SETTINGS } from "@/lib/constants";
 import { compactRecordsForStorage } from "@/lib/recognition-session";
 import type { AppSettings, ExtractedRecord } from "@/lib/types";
 import { normalizeSettings } from "@/lib/vision-agents";
-import { useLocalStorage } from "@/lib/use-local-storage";
+import {
+  hasRestorableSettingsBackup,
+  resetCorruptedSettings,
+  restoreSettingsBackup,
+  SETTINGS_STORAGE_KEY,
+  useLocalStorage,
+} from "@/lib/use-local-storage";
+import { useIndexedDbStorage } from "@/lib/use-indexed-db-storage";
 import { cn } from "@/lib/utils";
 import { appendAppLog, logAppError } from "@/lib/app-logs";
 import { ExcelTab } from "@/components/excel-tab";
@@ -28,6 +35,9 @@ const TABS = [
 
 export function AppShell() {
   const [tab, setTab] = useState<Tab>("recognition");
+  const [storageFailure, setStorageFailure] = useState<string | null>(null);
+  const [settingsParseError, setSettingsParseError] = useState(false);
+  const [canRestoreSettings, setCanRestoreSettings] = useState(false);
   const [settings, setSettings] = useLocalStorage<AppSettings>(
     "digitizer-settings",
     DEFAULT_SETTINGS,
@@ -35,27 +45,69 @@ export function AppShell() {
     1,
     normalizeSettings,
   );
-  const [records, setRecords] = useLocalStorage<ExtractedRecord[]>(
+  const [records, setRecords, recordsReady] = useIndexedDbStorage<ExtractedRecord[]>(
     "digitizer-session",
     EMPTY_RECORDS,
     compactRecordsForStorage,
   );
-  const [queue, setQueue] = useLocalStorage<ExtractedRecord[]>(
+  const [queue, setQueue, queueReady] = useIndexedDbStorage<ExtractedRecord[]>(
     "digitizer-excel-queue",
     EMPTY_RECORDS,
     compactRecordsForStorage,
   );
 
   useEffect(() => {
-    const handleQuota = () => toast.error("Хранилище браузера заполнено. Экспортируйте сессию и удалите часть записей.");
-    const handleParseError = () => toast.error("Не удалось прочитать настройки: файл поврежден. Создана резервная копия, настройки сброшены.");
-    window.addEventListener("storage-quota-error", handleQuota);
+    const inspectSettings = () => {
+      const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+      if (raw === null) return;
+      try {
+        JSON.parse(raw);
+      } catch {
+        setSettingsParseError(true);
+        setCanRestoreSettings(hasRestorableSettingsBackup());
+      }
+    };
+    const handleWriteError = (event: Event) => {
+      const detail = (event as CustomEvent<{ message?: string }>).detail;
+      setStorageFailure(detail?.message || "Браузер отклонил запись данных.");
+    };
+    const handleWriteSuccess = () => setStorageFailure(null);
+    const handleParseError = (event: Event) => {
+      const detail = (event as CustomEvent<{ key?: string; canRestore?: boolean }>).detail;
+      if (detail?.key !== SETTINGS_STORAGE_KEY) return;
+      setSettingsParseError(true);
+      setCanRestoreSettings(Boolean(detail.canRestore));
+    };
+    inspectSettings();
+    window.addEventListener("storage-write-error", handleWriteError);
+    window.addEventListener("storage-write-success", handleWriteSuccess);
     window.addEventListener("storage-parse-error", handleParseError);
     return () => {
-      window.removeEventListener("storage-quota-error", handleQuota);
+      window.removeEventListener("storage-write-error", handleWriteError);
+      window.removeEventListener("storage-write-success", handleWriteSuccess);
       window.removeEventListener("storage-parse-error", handleParseError);
     };
   }, []);
+
+  const recoverSettings = () => {
+    const restored = restoreSettingsBackup();
+    if (!restored) {
+      setStorageFailure("Не удалось восстановить резервную копию настроек.");
+      return;
+    }
+    setSettingsParseError(false);
+    toast.success("Настройки восстановлены из резервной копии");
+  };
+
+  const resetSettings = () => {
+    const reset = resetCorruptedSettings(DEFAULT_SETTINGS, 1);
+    if (!reset) {
+      setStorageFailure("Не удалось сохранить стандартные настройки.");
+      return;
+    }
+    setSettingsParseError(false);
+    toast.success("Сохранены стандартные настройки");
+  };
 
   useEffect(() => {
     appendAppLog({
@@ -100,7 +152,7 @@ export function AppShell() {
             </div>
           </div>
           <div className="inline-flex items-center gap-2 self-start rounded-md border border-[#dfe7e4] bg-[#f8faf9] px-3 py-2 text-xs text-[#5e6c68] lg:self-auto">
-            <ShieldCheck className="size-4 text-[#287462]" /> API-ключи хранятся только в браузере
+            <ShieldCheck className="size-4 text-[#287462]" /> Ключи: браузер или защищённые переменные сервера
           </div>
         </div>
         <nav className="mx-auto flex max-w-[1540px] gap-1 overflow-x-auto px-4 sm:px-6 lg:px-8" aria-label="Разделы приложения">
@@ -123,19 +175,41 @@ export function AppShell() {
         </nav>
       </header>
 
+      {(storageFailure || settingsParseError) && (
+        <div className="sticky top-0 z-50 border-b border-red-300 bg-red-50 px-4 py-3 text-red-900" role="alert" aria-live="assertive">
+          <div className="mx-auto flex max-w-[1540px] flex-wrap items-center gap-3">
+            <AlertTriangle className="size-5 shrink-0" />
+            <strong>{storageFailure ? "Настройки НЕ сохранены" : "Настройки повреждены и не были перезаписаны"}</strong>
+            <span className="text-sm">{storageFailure || "Можно восстановить последнюю резервную копию или явно сбросить настройки."}</span>
+            {settingsParseError && canRestoreSettings && (
+              <button type="button" className="rounded-md border border-red-400 bg-white px-3 py-1.5 text-sm font-medium" onClick={recoverSettings}>Восстановить копию</button>
+            )}
+            {settingsParseError && (
+              <button type="button" className="rounded-md border border-red-400 bg-white px-3 py-1.5 text-sm font-medium" onClick={resetSettings}>Сбросить настройки</button>
+            )}
+          </div>
+        </div>
+      )}
+
       <main className="mx-auto w-full max-w-[1540px] px-4 py-6 sm:px-6 lg:px-8">
-        <div hidden={tab !== "recognition"}>
-          <RecognitionTab settings={settings} records={records} onRecordsChange={setRecords} onSendToExcel={sendToExcel} />
-        </div>
-        <div hidden={tab !== "excel"}>
-          <ExcelTab settings={settings} queue={queue} onQueueConsumed={() => setQueue([])} />
-        </div>
-        <div hidden={tab !== "logs"}>
-          <LogsTab />
-        </div>
-        <div hidden={tab !== "settings"}>
-          <SettingsTab settings={settings} onChange={setSettings} />
-        </div>
+        {!recordsReady || !queueReady ? (
+          <div className="rounded-md border border-[#dce5e1] bg-white p-8 text-center text-sm text-[#687671]">Загрузка сохранённой сессии…</div>
+        ) : (
+          <>
+            <div hidden={tab !== "recognition"}>
+              <RecognitionTab settings={settings} records={records} onRecordsChange={setRecords} onSendToExcel={sendToExcel} />
+            </div>
+            <div hidden={tab !== "excel"}>
+              <ExcelTab settings={settings} queue={queue} onQueueConsumed={() => setQueue([])} />
+            </div>
+            <div hidden={tab !== "logs"}>
+              <LogsTab />
+            </div>
+            <div hidden={tab !== "settings"}>
+              <SettingsTab settings={settings} onChange={setSettings} />
+            </div>
+          </>
+        )}
       </main>
       <Toaster richColors position="top-right" closeButton />
     </div>

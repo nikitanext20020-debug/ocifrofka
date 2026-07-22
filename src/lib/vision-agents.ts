@@ -26,10 +26,20 @@ export function normalizeParallelRequests(value: unknown) {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function normalizeSettings(value: any): AppSettings {
-  const settings = value ?? {};
+  const settings = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   const parallelRequests = normalizeParallelRequests(settings.parallelRequests);
 
-  let visionAgents = settings.visionAgents;
+  let visionAgents = Array.isArray(settings.visionAgents)
+    ? settings.visionAgents
+      .filter((agent: unknown) => agent && typeof agent === "object")
+      .map((agent: Record<string, unknown>, index: number) => ({
+        id: typeof agent.id === "string" && agent.id ? agent.id : crypto.randomUUID(),
+        name: typeof agent.name === "string" && agent.name.trim() ? agent.name : `Агент распознавания ${index + 1}`,
+        baseUrl: typeof agent.baseUrl === "string" ? agent.baseUrl : "",
+        apiKey: typeof agent.apiKey === "string" ? agent.apiKey : "",
+        model: typeof agent.model === "string" ? agent.model : "",
+      }))
+    : undefined;
   let activeVisionAgentId = settings.activeVisionAgentId;
   if (!Array.isArray(visionAgents) || visionAgents.length === 0) {
     const defaultVision = (DEFAULT_SETTINGS?.visionAgents && DEFAULT_SETTINGS.visionAgents[0]) || {
@@ -48,7 +58,17 @@ export function normalizeSettings(value: any): AppSettings {
       : visionAgents[0].id;
   }
 
-  let tableAgents = settings.tableAgents;
+  let tableAgents = Array.isArray(settings.tableAgents)
+    ? settings.tableAgents
+      .filter((agent: unknown) => agent && typeof agent === "object")
+      .map((agent: Record<string, unknown>, index: number) => ({
+        id: typeof agent.id === "string" && agent.id ? agent.id : crypto.randomUUID(),
+        name: typeof agent.name === "string" && agent.name.trim() ? agent.name : `Excel-агент ${index + 1}`,
+        baseUrl: typeof agent.baseUrl === "string" ? agent.baseUrl : "",
+        apiKey: typeof agent.apiKey === "string" ? agent.apiKey : "",
+        model: typeof agent.model === "string" ? agent.model : "",
+      }))
+    : undefined;
   let activeTableAgentId = settings.activeTableAgentId;
   if (!Array.isArray(tableAgents) || tableAgents.length === 0) {
     const defaultTable = (DEFAULT_SETTINGS?.tableAgents && DEFAULT_SETTINGS.tableAgents[0]) || {
@@ -79,10 +99,14 @@ export function normalizeSettings(value: any): AppSettings {
     tableAgents,
     activeTableAgentId,
     parallelRequests,
-    table: settings.table || tableAgents[0],
-    extractionPrompt: settings.extractionPrompt || DEFAULT_SETTINGS.extractionPrompt,
-    agentTimeout: settings.agentTimeout ?? DEFAULT_SETTINGS.agentTimeout,
-    pingHistory: settings.pingHistory,
+    table: tableAgents[0],
+    extractionPrompt: typeof settings.extractionPrompt === "string" && settings.extractionPrompt.trim()
+      ? settings.extractionPrompt
+      : DEFAULT_SETTINGS.extractionPrompt,
+    agentTimeout: typeof settings.agentTimeout === "number" && Number.isFinite(settings.agentTimeout)
+      ? Math.max(5, Math.min(300, Math.round(settings.agentTimeout)))
+      : DEFAULT_SETTINGS.agentTimeout,
+    pingHistory: settings.pingHistory && typeof settings.pingHistory === "object" ? settings.pingHistory : undefined,
   };
 }
 
@@ -111,4 +135,3 @@ export function createEmptyTableAgent(index: number): TableAgent {
     model: "",
   };
 }
-

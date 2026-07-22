@@ -147,7 +147,7 @@ export function ExcelTab({
   const [tablePage, setTablePage] = useState(0);
 
   // Autopilot states and configuration
-  const [hideUtilityColumns, setHideUtilityColumns] = useState(false);
+  const [hideUtilityColumns, setHideUtilityColumns] = useLocalStorage("digitizer-hide-utility-columns", false);
   const [autopilotRowsPerCycle, setAutopilotRowsPerCycle] = useLocalStorage<number>("autopilot-rows-per-cycle", 10);
   const [autopilotIntervalMinutes, setAutopilotIntervalMinutes] = useLocalStorage<number>("autopilot-interval-minutes", 5);
   const [autopilotMaxRowsTotal, setAutopilotMaxRowsTotal] = useLocalStorage<string>("autopilot-max-rows-total", "");
@@ -176,6 +176,7 @@ export function ExcelTab({
     generationCount: 10,
     maxRows: "",
     junkColumns: new Set<number>(),
+    busy: null as BusyAction,
   });
 
   const table = workbook ? workbook.sheets[workbook.activeSheet] : null;
@@ -245,8 +246,9 @@ export function ExcelTab({
       generationCount: autopilotRowsPerCycle,
       maxRows: autopilotMaxRowsTotal,
       junkColumns,
+      busy,
     };
-  }, [table, analysis, insertRow, syntheticRows, categoricalDefaults, marks, newRows, generationInstruction, instruction, autopilotRowsPerCycle, autopilotMaxRowsTotal, junkColumns]);
+  }, [table, analysis, insertRow, syntheticRows, categoricalDefaults, marks, newRows, generationInstruction, instruction, autopilotRowsPerCycle, autopilotMaxRowsTotal, junkColumns, busy]);
   const updateColumnMapping = (field: MappableField, rawValue: string) => {
     const column = rawValue === "" ? null : Number(rawValue);
     setAnalysis((current) => {
@@ -544,9 +546,9 @@ export function ExcelTab({
     instructionText: string,
   ) => {
     const examples = currentTable.rows
-      .filter((row: any, rowIndex: number) => (
+      .filter((row: unknown[], rowIndex: number) => (
         !currentSyntheticRows.includes(rowIndex)
-        && row.filter((value: any) => String(value ?? "").trim()).length >= Math.min(3, currentTable.headers.length)
+        && row.filter((value: unknown) => String(value ?? "").trim()).length >= Math.min(3, currentTable.headers.length)
       ))
       .slice(0, 20);
     const categoricals = Object.fromEntries(
@@ -678,7 +680,7 @@ export function ExcelTab({
       if (headerName && isDerivedCategoryHeader(headerName)) columnCategoricals[headerName] = values;
     }
     const examples = workingTable.rows
-      .filter((row: any) => Object.values(currentAnalysis.mapping).every((column: any) => column === null || String(row[column] ?? "").trim()))
+      .filter((row: unknown[]) => Object.values(currentAnalysis.mapping).every((column) => column === null || String(row[column] ?? "").trim()))
       .slice(0, 10);
     const groupedRows = [...new Set(modelGaps.map(({ row }) => row))];
     const tasks: Array<() => Promise<CellChange[]>> = [];
@@ -862,7 +864,7 @@ export function ExcelTab({
   };
 
   const executeAutopilotCycle = async () => {
-    if (autopilotRunningRef.current || busy !== null) {
+    if (autopilotRunningRef.current || stateRef.current.busy !== null) {
       addAutopilotLog("Пропуск тика: идет выполнение другой операции или цикла", "info");
       return;
     }
@@ -873,7 +875,6 @@ export function ExcelTab({
       insertRow: currentInsertRow,
       syntheticRows: currentSyntheticRows,
       categoricalDefaults: currentCategoricalDefaults,
-      marks: currentMarks,
       generationInstruction: currentGenInstruction,
       instruction: currentInstruction,
       generationCount: currentGenCount,
@@ -1013,13 +1014,11 @@ export function ExcelTab({
   useEffect(() => {
     if (autopilotIsActive) {
       const intervalSec = autopilotIntervalMinutes * 60;
-      setAutopilotCountdown(intervalSec);
-
       countdownIntervalRef.current = setInterval(() => {
         setAutopilotCountdown((prev) => {
           if (prev === null) return null;
           if (prev <= 1) {
-            if (!autopilotRunningRef.current && busy === null) {
+            if (!autopilotRunningRef.current && stateRef.current.busy === null) {
               void executeAutopilotCycle();
             } else {
               addAutopilotLog("Пропуск тика: предыдущий цикл или другая операция еще выполняются", "info");
@@ -1034,7 +1033,6 @@ export function ExcelTab({
         clearInterval(countdownIntervalRef.current);
         countdownIntervalRef.current = null;
       }
-      setAutopilotCountdown(null);
     }
 
     return () => {
@@ -1225,7 +1223,7 @@ export function ExcelTab({
               <SectionTitle title="Действия Excel-агента" description="Модель возвращает только список изменений; таблица изменяется локально." />
               <div className="mt-5 flex flex-wrap items-center gap-2">
                 <Button loading={busy === "analyze"} onClick={analyze}><Bot className="size-4" /> Проанализировать таблицу</Button>
-                <Button variant="secondary" loading={busy === "insert"} disabled={!analysis || !queue.length} onClick={insertRecords}><PlusCircle className="size-4" /> Занести данные из распознавания {queue.length ? `· ${queue.length}` : ""}</Button>
+                <Button variant="secondary" loading={busy === "insert"} disabled={autopilotIsActive || !analysis || !queue.length} onClick={insertRecords}><PlusCircle className="size-4" /> Занести данные из распознавания {queue.length ? `· ${queue.length}` : ""}</Button>
                 {analysis && insertRow !== null && (
                   <label className="flex items-center gap-1.5 text-sm text-[#61706b]">
                     со строки:
@@ -1243,7 +1241,7 @@ export function ExcelTab({
                     />
                   </label>
                 )}
-                <Button variant="secondary" loading={busy === "gaps"} disabled={!analysis || !newRows.length} onClick={fillGaps}><Sparkles className="size-4" /> {instruction.trim() ? "Дополнить пропуски по инструкции" : "Дополнить пропуски в новых строках"}</Button>
+                <Button variant="secondary" loading={busy === "gaps"} disabled={autopilotIsActive || !analysis || !newRows.length} onClick={fillGaps}><Sparkles className="size-4" /> {instruction.trim() ? "Дополнить пропуски по инструкции" : "Дополнить пропуски в новых строках"}</Button>
               </div>
               {!analysis && <p className="mt-3 text-sm text-[#806b32]">Сначала проанализируйте таблицу, чтобы определить колонки и форматы.</p>}
               {notice && <div className="mt-4 rounded-md border border-[#b9dfd3] bg-[#edf8f4] px-4 py-3 text-sm font-medium text-[#1e6958]">{notice}</div>}
@@ -1517,7 +1515,7 @@ export function ExcelTab({
               </label>
               <Button
                 loading={busy === "generate"}
-                disabled={!analysis || busy !== null}
+                disabled={autopilotIsActive || !analysis || busy !== null}
                 onClick={generateSyntheticRows}
               >
                 <Sparkles className="size-4" /> Создать тестовые строки

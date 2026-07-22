@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { readStored } from "./use-local-storage";
+import {
+  readStored,
+  restoreSettingsBackup,
+  SETTINGS_BACKUP_KEY,
+  SETTINGS_STORAGE_KEY,
+} from "./use-local-storage";
 
 // Since tests run in a "node" environment, we mock localStorage and window objects.
 class LocalStorageMock {
@@ -71,9 +76,8 @@ describe("useLocalStorage / readStored versioning and safety", () => {
     });
   });
 
-  it("handles corrupted JSON by backing it up and falling back to default", () => {
-    const key = "test-corrupted";
-    localStorage.setItem(key, "invalid { json");
+  it("keeps corrupted settings untouched and uses one fixed backup key", () => {
+    localStorage.setItem(SETTINGS_STORAGE_KEY, "invalid { json");
 
     const dispatchMock = vi.fn();
     vi.stubGlobal("window", {
@@ -82,7 +86,7 @@ describe("useLocalStorage / readStored versioning and safety", () => {
       dispatchEvent: dispatchMock,
     });
 
-    const value = readStored(key, { def: "value" });
+    const value = readStored(SETTINGS_STORAGE_KEY, { def: "value" });
 
     // Returns fallback
     expect(value).toEqual({ def: "value" });
@@ -92,13 +96,19 @@ describe("useLocalStorage / readStored versioning and safety", () => {
     const event = dispatchMock.mock.calls[0][0];
     expect(event.type).toBe("storage-parse-error");
 
-    // Creates backup key in localStorage
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const backupKey = Object.keys((localStorage as any).store).find(k => k.startsWith(`${key}-backup-`));
-    expect(backupKey).toBeDefined();
-    expect(localStorage.getItem(backupKey!)).toBe("invalid { json");
+    expect(localStorage.getItem(SETTINGS_BACKUP_KEY)).toBe("invalid { json");
 
-    // Overwrites corrupted key with clean fallback in localStorage
-    expect(localStorage.getItem(key)).toBe(JSON.stringify({ def: "value" }));
+    // The corrupted source is not silently replaced with defaults.
+    expect(localStorage.getItem(SETTINGS_STORAGE_KEY)).toBe("invalid { json");
+  });
+
+  it("restores a valid settings backup over corrupted settings", () => {
+    const backup = JSON.stringify({ version: 1, settings: { restored: true } });
+    localStorage.setItem(SETTINGS_STORAGE_KEY, "broken");
+    localStorage.setItem(SETTINGS_BACKUP_KEY, backup);
+
+    expect(restoreSettingsBackup()).toBe(true);
+    expect(localStorage.getItem(SETTINGS_STORAGE_KEY)).toBe(backup);
+    expect(readStored(SETTINGS_STORAGE_KEY, { restored: false }, 1, (value) => value)).toEqual({ restored: true });
   });
 });

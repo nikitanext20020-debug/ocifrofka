@@ -243,7 +243,7 @@ function rowsForPrompt(rows: unknown[][]) {
 
 export async function POST(request: Request) {
   try {
-    const config = readAgentConfig(request);
+    const config = readAgentConfig(request, "table");
     const body = bodySchema.parse(await request.json());
     const columns = body.headers.map((header, index) => ({
       index,
