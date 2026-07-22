@@ -6,12 +6,13 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-export function agentHeaders(config: AgentConfig) {
+export function agentHeaders(config: AgentConfig, meta?: { kind: "vision" | "table"; index: number }) {
   return {
     "Content-Type": "application/json",
     "x-agent-base-url": config.baseUrl,
     "x-agent-api-key": config.apiKey,
     "x-agent-model": config.model,
+    ...(meta ? { "x-agent-kind": meta.kind, "x-agent-index": String(meta.index) } : {}),
   };
 }
 

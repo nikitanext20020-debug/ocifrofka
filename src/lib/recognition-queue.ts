@@ -116,11 +116,15 @@ export async function fetchWithFailover<
     const tId = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
+      const agentIndex = agents.indexOf(agent) + 1;
+      const agentKind = options.path === "/api/extract" ? "vision" : "table";
       const headers = {
         "Content-Type": "application/json",
         "x-agent-base-url": agent.baseUrl,
         "x-agent-api-key": agent.apiKey,
         "x-agent-model": agent.model,
+        "x-agent-kind": agentKind,
+        "x-agent-index": String(agentIndex),
       };
 
       const response = await fetchWithRateLimitRetry(
@@ -174,4 +178,3 @@ export async function fetchWithFailover<
 
   throw new Error(`Все доступные агенты вернули ошибку:\n${errors.join("\n")}`);
 }
-

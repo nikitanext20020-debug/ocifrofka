@@ -12,7 +12,7 @@ const requestSchema = z.object({
 
 export async function POST(request: Request) {
   try {
-    const config = readAgentConfig(request);
+    const config = readAgentConfig(request, "vision");
     const { image, prompt } = requestSchema.parse(await request.json());
     const data = await callStructured({
       config,

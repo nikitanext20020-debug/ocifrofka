@@ -13,6 +13,8 @@ type AgentRequestConfig = {
   model: string;
 };
 
+export type AgentKind = "table" | "vision";
+
 export class ModelApiError extends Error {
   status: number;
   retryable: boolean;
@@ -81,13 +83,39 @@ async function validateBaseUrl(value: string) {
   return url;
 }
 
-export function readAgentConfig(request: Request): AgentRequestConfig {
+function normalizedBaseUrl(value: string) {
+  return value.trim().replace(/\/+$/, "").toLowerCase();
+}
+
+function serverApiKey(request: Request, kind?: AgentKind) {
+  const resolvedKind = kind ?? (request.headers.get("x-agent-kind") === "vision" ? "vision" : "table");
+  const prefix = resolvedKind === "vision" ? "VISION" : "TABLE";
+  const baseUrl = normalizedBaseUrl(request.headers.get("x-agent-base-url") ?? "");
+  const rawIndex = Number(request.headers.get("x-agent-index"));
+
+  // An explicitly configured base URL wins, so reordering agents on the client
+  // does not accidentally select a different secret.
+  for (let index = 1; index <= 50; index += 1) {
+    const configuredBaseUrl = process.env[`${prefix}_API_BASE_URL_${index}`];
+    if (configuredBaseUrl && normalizedBaseUrl(configuredBaseUrl) === baseUrl) {
+      return process.env[`${prefix}_API_KEY_${index}`]?.trim() ?? "";
+    }
+  }
+
+  if (Number.isInteger(rawIndex) && rawIndex >= 1 && rawIndex <= 50) {
+    return process.env[`${prefix}_API_KEY_${rawIndex}`]?.trim() ?? "";
+  }
+  return "";
+}
+
+export function readAgentConfig(request: Request, kind?: AgentKind): AgentRequestConfig {
   const baseUrl = request.headers.get("x-agent-base-url")?.trim() ?? "";
-  const apiKey = request.headers.get("x-agent-api-key")?.trim() ?? "";
+  const clientApiKey = request.headers.get("x-agent-api-key")?.trim() ?? "";
+  const apiKey = clientApiKey || serverApiKey(request, kind);
   const model = request.headers.get("x-agent-model")?.trim() ?? "";
   if (!baseUrl || !apiKey || !model) {
     throw new ModelApiError(
-      "Заполните base_url, API-ключ и ID модели в настройках.",
+      "Заполните base_url и ID модели, а также API-ключ в настройках или на сервере.",
       400,
     );
   }

@@ -155,7 +155,6 @@ describe("refineColumnMapping", () => {
     //         but 200 synthetic rows in col 1 have addresses.
     // «Статус данных» col marks those rows as synthetic.
     // After exclusion, col 1 has 0 real-row samples → heuristic doesn't fire.
-    const STATUS_COL = 5;
     const headers = [
       "Адрес проживания",
       "Колонка 2",

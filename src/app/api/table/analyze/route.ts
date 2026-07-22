@@ -17,7 +17,7 @@ export async function POST(request: Request) {
     const localAnalysis = analyzeTableDeterministically(body.headers, body.rows);
     if (localAnalysis) return Response.json(localAnalysis);
 
-    const config = readAgentConfig(request);
+    const config = readAgentConfig(request, "table");
     const result = await callStructured({
       config,
       schema: tableAnalysisSchema,

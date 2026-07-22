@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { CirclePlus, Eye, EyeOff, RotateCcw, Save, ServerCog, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { CirclePlus, Download, Eye, EyeOff, RotateCcw, Save, ServerCog, Trash2, Undo2, Upload } from "lucide-react";
 import { toast } from "sonner";
 import {
   DEFAULT_EXTRACTION_PROMPT,
@@ -12,10 +12,12 @@ import {
   createEmptyVisionAgent,
   createEmptyTableAgent,
   normalizeParallelRequests,
+  normalizeSettings,
 } from "@/lib/vision-agents";
 import type { AgentConfig, AppSettings, VisionAgent, TableAgent } from "@/lib/types";
-import { agentHeaders, readApiResponse } from "@/lib/utils";
+import { agentHeaders, downloadBlob, readApiResponse } from "@/lib/utils";
 import { loggedFetch } from "@/lib/app-logs";
+import { useLocalStorage } from "@/lib/use-local-storage";
 import { Button, Card, Input, SectionTitle } from "@/components/ui";
 
 const getTimestamp = () => Date.now();
@@ -143,9 +145,10 @@ function AgentSection({
         <label className="block">
           <span className="mb-1.5 block text-sm font-medium">API-ключ</span>
           <div className="relative">
-            <Input className="pr-10" type={showKey ? "text" : "password"} value={value.apiKey} autoComplete="off" onChange={(event) => set("apiKey", event.target.value)} placeholder="Хранится только в этом браузере" />
+            <Input className="pr-10" type={showKey ? "text" : "password"} value={value.apiKey} autoComplete="off" onChange={(event) => set("apiKey", event.target.value)} placeholder="Оставьте пустым — используется ключ сервера" />
             <button type="button" title={showKey ? "Скрыть ключ" : "Показать ключ"} className="absolute right-2 top-2 p-1 text-[#687671]" onClick={() => setShowKey((current) => !current)}>{showKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}</button>
           </div>
+          <span className="mt-1.5 block text-xs text-[#71807b]">Оставьте пустым — используется ключ сервера, если он настроен администратором.</span>
         </label>
         <label className="block">
           <span className="mb-1.5 block text-sm font-medium">ID модели</span>
@@ -173,10 +176,21 @@ function AgentSection({
   );
 }
 
-export function SettingsTab({ settings, onChange }: { settings: AppSettings; onChange: (settings: AppSettings) => void }) {
+type ImportSnapshot = {
+  settings: AppSettings;
+  fillGapsInstruction: string;
+  generationInstruction: string;
+};
+
+export function SettingsTab({ settings, onChange }: { settings: AppSettings; onChange: (settings: AppSettings) => boolean }) {
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [prevSettings, setPrevSettings] = useState<AppSettings>(settings);
   const [pingAllChecking, setPingAllChecking] = useState<Record<string, boolean>>({});
+  const [includeKeysInExport, setIncludeKeysInExport] = useState(false);
+  const [importSnapshot, setImportSnapshot] = useState<ImportSnapshot | null>(null);
+  const importInputRef = useRef<HTMLInputElement>(null);
+  const [fillGapsInstruction, setFillGapsInstruction] = useLocalStorage("digitizer-fill-gaps-instruction", "");
+  const [generationInstruction, setGenerationInstruction] = useLocalStorage("digitizer-generation-instruction", "");
 
   // Sync draft when the persisted settings change externally (e.g. after save/normalize).
   if (prevSettings !== settings) {
@@ -187,8 +201,85 @@ export function SettingsTab({ settings, onChange }: { settings: AppSettings; onC
   const dirty = JSON.stringify(draft) !== JSON.stringify(settings);
 
   const save = () => {
-    onChange(draft);
-    toast.success("Настройки сохранены");
+    if (onChange(draft)) toast.success("Настройки сохранены");
+  };
+
+  const settingsForExport = () => {
+    if (includeKeysInExport) return draft;
+    return {
+      ...draft,
+      visionAgents: draft.visionAgents.map((agent) => ({ ...agent, apiKey: "" })),
+      tableAgents: draft.tableAgents.map((agent) => ({ ...agent, apiKey: "" })),
+      table: draft.table ? { ...draft.table, apiKey: "" } : undefined,
+    };
+  };
+
+  const exportSettings = () => {
+    const payload = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      settings: settingsForExport(),
+      prompts: { extraction: draft.extractionPrompt },
+      instructions: {
+        fillGaps: fillGapsInstruction,
+        generation: generationInstruction,
+      },
+    };
+    downloadBlob(
+      new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }),
+      `digitizer-settings-${new Date().toISOString().slice(0, 10)}.json`,
+    );
+  };
+
+  const rollbackImport = () => {
+    if (!importSnapshot) return;
+    const settingsRestored = onChange(importSnapshot.settings);
+    const fillRestored = setFillGapsInstruction(importSnapshot.fillGapsInstruction);
+    const generationRestored = setGenerationInstruction(importSnapshot.generationInstruction);
+    if (settingsRestored && fillRestored && generationRestored) {
+      setDraft(importSnapshot.settings);
+      setImportSnapshot(null);
+      toast.success("Импорт настроек отменён");
+    }
+  };
+
+  const importSettings = async (file: File) => {
+    try {
+      const payload = JSON.parse(await file.text()) as unknown;
+      if (!payload || typeof payload !== "object" || !("settings" in payload)) {
+        throw new Error("В JSON отсутствует объект settings.");
+      }
+      const source = payload as {
+        settings: unknown;
+        prompts?: { extraction?: unknown };
+        instructions?: { fillGaps?: unknown; generation?: unknown };
+      };
+      const candidate = source.prompts && typeof source.prompts.extraction === "string"
+        ? { ...(source.settings as object), extractionPrompt: source.prompts.extraction }
+        : source.settings;
+      const normalized = normalizeSettings(candidate);
+      const nextFill = typeof source.instructions?.fillGaps === "string" ? source.instructions.fillGaps : fillGapsInstruction;
+      const nextGeneration = typeof source.instructions?.generation === "string" ? source.instructions.generation : generationInstruction;
+      const snapshot = { settings, fillGapsInstruction, generationInstruction };
+
+      const settingsSaved = onChange(normalized);
+      const fillSaved = setFillGapsInstruction(nextFill);
+      const generationSaved = setGenerationInstruction(nextGeneration);
+      if (!settingsSaved || !fillSaved || !generationSaved) {
+        onChange(snapshot.settings);
+        setFillGapsInstruction(snapshot.fillGapsInstruction);
+        setGenerationInstruction(snapshot.generationInstruction);
+        throw new Error("Не удалось записать все импортированные данные.");
+      }
+
+      setDraft(normalized);
+      setImportSnapshot(snapshot);
+      toast.success("Настройки загружены и проверены");
+    } catch (error) {
+      toast.error(error instanceof Error ? `Не удалось загрузить настройки: ${error.message}` : "Не удалось загрузить настройки");
+    } finally {
+      if (importInputRef.current) importInputRef.current.value = "";
+    }
   };
 
   const discard = () => {
@@ -205,7 +296,7 @@ export function SettingsTab({ settings, onChange }: { settings: AppSettings; onC
   };
 
   // Ping a single agent and save in state
-  const pingAgent = async (agentId: string, agent: AgentConfig) => {
+  const pingAgent = async (agentId: string, agent: AgentConfig, kind: "vision" | "table", index: number) => {
     const start = getTimestamp();
     const controller = new AbortController();
     const tId = setTimeout(() => controller.abort(), 10000); // 10s timeout
@@ -214,7 +305,7 @@ export function SettingsTab({ settings, onChange }: { settings: AppSettings; onC
         "/api/connection/test",
         {
           method: "POST",
-          headers: agentHeaders(agent),
+          headers: agentHeaders(agent, { kind, index }),
           body: "{}",
           signal: controller.signal,
         },
@@ -260,7 +351,7 @@ export function SettingsTab({ settings, onChange }: { settings: AppSettings; onC
     setPingAllChecking((current) => ({ ...current, [section]: true }));
     const agents = section === "vision" ? draft.visionAgents : draft.tableAgents;
     try {
-      const promises = agents.map((agent) => pingAgent(agent.id, agent));
+    const promises = agents.map((agent, index) => pingAgent(agent.id, agent, section, index + 1));
       await Promise.all(promises);
 
 
@@ -297,6 +388,29 @@ export function SettingsTab({ settings, onChange }: { settings: AppSettings; onC
 
   return (
     <div className="space-y-4 pb-24">
+      <Card className="p-5">
+        <SectionTitle title="Экспорт и импорт" description="Переносит агентов, промты и инструкции между браузерами. Импорт можно отменить до следующего импорта." />
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <Button variant="secondary" onClick={exportSettings}><Download className="size-4" /> Скачать настройки</Button>
+          <Button variant="secondary" onClick={() => importInputRef.current?.click()}><Upload className="size-4" /> Загрузить настройки</Button>
+          {importSnapshot && <Button variant="secondary" onClick={rollbackImport}><Undo2 className="size-4" /> Отменить импорт</Button>}
+          <label className="flex items-center gap-2 text-sm text-[#53615d]">
+            <input type="checkbox" className="size-4 accent-[#176b5b]" checked={includeKeysInExport} onChange={(event) => setIncludeKeysInExport(event.target.checked)} />
+            Включить API-ключи в файл
+          </label>
+          <input
+            ref={importInputRef}
+            className="hidden"
+            type="file"
+            accept="application/json,.json"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void importSettings(file);
+            }}
+          />
+        </div>
+        {includeKeysInExport && <p className="mt-3 text-sm font-medium text-[#9a4f35]">Внимание: JSON будет содержать API-ключи в открытом виде.</p>}
+      </Card>
       {/* Vision Agents Section */}
       <section className="space-y-3">
         <div className="flex items-center justify-between gap-4">
@@ -309,7 +423,7 @@ export function SettingsTab({ settings, onChange }: { settings: AppSettings; onC
             }}><CirclePlus className="size-4" /></button>
           </div>
         </div>
-        {draft.visionAgents.map((agent) => (
+        {draft.visionAgents.map((agent, index) => (
           <AgentSection
             key={agent.id}
             title={agent.name || "Без названия"}
@@ -329,7 +443,7 @@ export function SettingsTab({ settings, onChange }: { settings: AppSettings; onC
               });
             } : undefined}
             pingResult={draft.pingHistory?.[agent.id]}
-            onPing={() => pingAgent(agent.id, agent)}
+            onPing={() => pingAgent(agent.id, agent, "vision", index + 1)}
           />
         ))}
       </section>
@@ -398,7 +512,7 @@ export function SettingsTab({ settings, onChange }: { settings: AppSettings; onC
             }}><CirclePlus className="size-4" /></button>
           </div>
         </div>
-        {draft.tableAgents.map((agent) => (
+        {draft.tableAgents.map((agent, index) => (
           <AgentSection
             key={agent.id}
             title={agent.name || "Без названия"}
@@ -418,7 +532,7 @@ export function SettingsTab({ settings, onChange }: { settings: AppSettings; onC
               });
             } : undefined}
             pingResult={draft.pingHistory?.[agent.id]}
-            onPing={() => pingAgent(agent.id, agent)}
+            onPing={() => pingAgent(agent.id, agent, "table", index + 1)}
           />
         ))}
       </section>
@@ -427,7 +541,7 @@ export function SettingsTab({ settings, onChange }: { settings: AppSettings; onC
       <Card className="p-5">
         <SectionTitle title="Промт распознавания" description="Используется как system prompt для каждого изображения." action={<Button variant="secondary" onClick={() => setDraft((current) => ({ ...current, extractionPrompt: DEFAULT_EXTRACTION_PROMPT }))}><RotateCcw className="size-4" /> Сбросить к стандартному</Button>} />
         <textarea className="mt-5 min-h-64 w-full resize-y rounded-md border border-[#cbd6d2] bg-white p-3 text-sm leading-6 outline-none focus:border-[#23816e] focus:ring-2 focus:ring-[#23816e]/15" value={draft.extractionPrompt} onChange={(event) => setDraft((current) => ({ ...current, extractionPrompt: event.target.value }))} />
-        <p className="mt-2 text-xs text-[#7b8985]">Настройки и ключи сохраняются только в localStorage этого браузера.</p>
+        <p className="mt-2 text-xs text-[#7b8985]">Ключ из поля сохраняется в localStorage этого браузера. Пустое поле использует ключ сервера, если он настроен.</p>
       </Card>
 
       {/* Bottom Save/Discard Bar */}

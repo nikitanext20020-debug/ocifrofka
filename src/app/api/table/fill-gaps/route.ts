@@ -15,7 +15,7 @@ const bodySchema = z.object({
   examples: z.array(z.array(z.unknown())).max(30),
   formats: z.record(z.string(), z.string()),
   categoricals: z.record(z.string(), z.array(z.string())).optional().default({}),
-  instruction: z.string().max(3000).optional().default(""),
+  instruction: z.string().max(20_000).optional().default(""),
 });
 
 type FillBody = z.infer<typeof bodySchema>;
@@ -127,7 +127,7 @@ async function generateChanges(
 
 export async function POST(request: Request) {
   try {
-    const config = readAgentConfig(request);
+    const config = readAgentConfig(request, "table");
     const body = bodySchema.parse(await request.json());
     const rowsByIndex = new Map(body.rows.map(({ row, values }) => [row, values]));
     const safeGaps = body.gaps.filter(({ row, column }) => {
