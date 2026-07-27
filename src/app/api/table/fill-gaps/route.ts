@@ -57,8 +57,12 @@ function acceptedChanges(
     const allowedValues = categoricals[header];
     if (allowedValues?.length) {
       const canonical = allowedValues.find((candidate) => normalizedValue(candidate) === normalizedValue(value));
-      if (!canonical) continue;
-      value = canonical;
+      if (canonical) {
+        value = canonical;
+      } else {
+        // Fallback: use first allowed value instead of skipping the change
+        value = allowedValues[0];
+      }
     }
 
     if (normalizedValue(header).includes("дата рождения")) {
