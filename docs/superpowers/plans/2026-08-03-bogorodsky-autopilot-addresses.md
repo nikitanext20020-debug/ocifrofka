@@ -15,7 +15,7 @@
 - House numbers are synthetic and are not validated for real-world existence.
 - Settlement selection is balanced by settlement, not weighted by the number of streets.
 - The existing generator remains compatible with workbooks that have no mapped address column.
-- The local snapshot records source URL, source date, municipality, settlement type/name, and street type/name.
+- The local snapshot records the official registry URL, the public FIAS directory used for extraction, source date, municipality, and a FIAS GUID for every settlement and street.
 
 ---
 
@@ -91,12 +91,13 @@ Expected: FAIL because `@/lib/bogorodsky-addresses` does not exist.
 
 - [ ] **Step 3: Build and commit the FIAS/GAR snapshot**
 
-Use the official FIAS public search/download surface only as a development-time source. Collect active street-level children for settlements whose municipal hierarchy contains `Богородский городской округ`; save only the compact result, not tokens, responses, or tooling credentials. The JSON must use this exact shape:
+Use the public FIAS object directory at `https://фияс.сайт/` only as a development-time source. It exposes the FIAS/GAR hierarchy and GUID on ordinary pages without a token. Record `https://fias.nalog.ru/` as the official registry source, record the directory separately as `sourceMirror`, and retain the GUID for every settlement and street so each pair remains independently traceable. Save only the compact result, not raw responses or tooling state. The JSON uses this shape:
 
 ```json
 {
   "metadata": {
     "source": "https://fias.nalog.ru/",
+    "sourceMirror": "https://фияс.сайт/",
     "sourceDate": "2026-08-03",
     "municipality": "Богородский городской округ"
   },
@@ -104,13 +105,14 @@ Use the official FIAS public search/download surface only as a development-time 
     {
       "name": "Старая Купавна",
       "type": "г.",
-      "streets": [{ "name": "Кирова", "type": "ул." }]
+      "fiasId": "d49d936b-188f-4186-b2db-47e4b36682d6",
+      "streets": [{ "name": "Кирова", "type": "ул.", "fiasId": "..." }]
     }
   ]
 }
 ```
 
-Before accepting the snapshot, compare the settlement set to `SETTLEMENTS` in `src/lib/address-correction.ts`, remove inactive address objects, retain only settlements with at least one named street-level element, and preserve that file's settlement order so sequence `0` is Ногинск and sequence `1` is Старая Купавна.
+Before accepting the snapshot, compare the settlement set to `SETTLEMENTS` in `src/lib/address-correction.ts`, retain only settlements with at least one named child from the page's «Элемент улично-дорожной сети» section, validate GUID format and uniqueness, and preserve that file's settlement order so sequence `0` is Ногинск and sequence `1` is Старая Купавна.
 
 - [ ] **Step 4: Implement the minimal catalog module**
 

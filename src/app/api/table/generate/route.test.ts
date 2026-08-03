@@ -1,6 +1,10 @@
 import dns from "node:dns/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { POST } from "@/app/api/table/generate/route";
+import {
+  formatBogorodskyAddress,
+  selectBogorodskyAddress,
+} from "@/lib/bogorodsky-addresses";
 
 describe("table generator route", () => {
   afterEach(() => {
@@ -184,6 +188,63 @@ describe("table generator route", () => {
     const payload = await response.json();
     expect(payload.rows[0][1]).not.toContain("Несуществующая");
     expect(payload.rows[0][1]).toContain("Старая Купавна");
+  });
+
+  it("keeps the same catalog addresses when generation retries", async () => {
+    vi.spyOn(dns, "lookup").mockResolvedValue([
+      { address: "93.184.216.34", family: 4 },
+    ] as unknown as Awaited<ReturnType<typeof dns.lookup>>);
+    let attempt = 0;
+    const cleanRetryTexts = [
+      "Старое покрытие у дома разрушилось. Жители просят разобраться.",
+      "Детям трудно переходить этот участок. Хотелось бы сделать его безопаснее.",
+      "После дождя дорогу сильно размывает. Местные просят обратить внимание.",
+      "Автобусная остановка давно стоит без навеса. Людям нужен удобный павильон.",
+      "Пожилые жители обходят яму по проезжей части. Здесь требуется безопасный проход.",
+    ];
+    const fetchMock = vi.fn().mockImplementation(async () => {
+      attempt += 1;
+      const rows = Array.from({ length: 5 }, (_, index) => ({
+        0: attempt === 1
+          ? `Почините объект ${index + 1}. Жителям станет удобнее.`
+          : cleanRetryTexts[index],
+        1: `г. Ногинск, ул. Выдуманная-${attempt}-${index + 1}, д. 5`,
+      }));
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({ rows }) } }],
+      }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await POST(new Request("http://localhost/api/table/generate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-agent-base-url": "https://api.example.com/v1",
+        "x-agent-api-key": "test",
+        "x-agent-model": "test-model",
+      },
+      body: JSON.stringify({
+        count: 5,
+        headers: ["Текст наказа", "Адрес"],
+        examples: [],
+        formats: {},
+        categoricals: {},
+        fixedValues: {},
+        instruction: "",
+        addressColumn: 1,
+        sequenceStart: 0,
+      }),
+    }));
+
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    const expectedAddresses = Array.from({ length: 5 }, (_, sequence) => (
+      formatBogorodskyAddress(selectBogorodskyAddress(sequence), sequence)
+    ));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(payload.rows[0][0]).toBe(cleanRetryTexts[0]);
+    expect(payload.rows.map((row: string[]) => row[1])).toEqual(expectedAddresses);
   });
 
   it("rejects an address column outside the table", async () => {

@@ -8,6 +8,7 @@ import {
 
 describe("Bogorodsky address catalog", () => {
   it("contains unique real street pairs and the required settlements", () => {
+    const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const names = BOGORODSKY_SETTLEMENTS.map((item) => item.name);
     expect(names).toEqual(expect.arrayContaining([
       "Ногинск",
@@ -16,14 +17,20 @@ describe("Bogorodsky address catalog", () => {
       "Мамонтово",
     ]));
 
-    const pairs = BOGORODSKY_SETTLEMENTS.flatMap((settlement) =>
-      settlement.streets.map((street) => (
-        `${settlement.name}|${street.type}|${street.name}`
+    const fiasIds: string[] = [];
+    const pairs = BOGORODSKY_SETTLEMENTS.flatMap((settlement) => {
+      expect(settlement.fiasId).toMatch(uuidPattern);
+      fiasIds.push(settlement.fiasId);
+      return settlement.streets.map((street) => {
+        expect(street.fiasId).toMatch(uuidPattern);
+        fiasIds.push(street.fiasId);
+        return `${settlement.name}|${street.type}|${street.name}`
           .toLocaleLowerCase("ru-RU")
-          .replaceAll("ё", "е")
-      )),
-    );
+          .replaceAll("ё", "е");
+      });
+    });
     expect(new Set(pairs).size).toBe(pairs.length);
+    expect(new Set(fiasIds).size).toBe(fiasIds.length);
     expect(pairs.every((pair) => !pair.endsWith("|"))).toBe(true);
   });
 
