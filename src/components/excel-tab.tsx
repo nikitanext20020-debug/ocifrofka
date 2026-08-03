@@ -581,6 +581,7 @@ export function ExcelTab({
         categoricals,
         fixedValues,
         instruction: instructionText.trim(),
+        addressColumn: currentAnalysis.mapping.address,
         sequenceStart: startIndex,
         forbiddenTexts,
       }),
