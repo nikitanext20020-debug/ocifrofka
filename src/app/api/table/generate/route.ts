@@ -6,6 +6,10 @@ import {
   normalizeGeneratedModelRows,
   type GeneratedRowSource,
 } from "@/lib/generated-rows";
+import {
+  formatBogorodskyAddress,
+  selectBogorodskyAddress,
+} from "@/lib/bogorodsky-addresses";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -18,8 +22,17 @@ const bodySchema = z.object({
   categoricals: z.record(z.string(), z.array(z.string()).min(1).max(50)).optional().default({}),
   fixedValues: z.record(z.string(), z.string()).optional().default({}),
   instruction: z.string().max(3000).optional().default(""),
+  addressColumn: z.number().int().nonnegative().nullable().optional().default(null),
   sequenceStart: z.number().int().nonnegative().optional().default(0),
   forbiddenTexts: z.array(z.string().max(300)).max(300).optional().default([]),
+}).superRefine((body, context) => {
+  if (body.addressColumn !== null && body.addressColumn >= body.headers.length) {
+    context.addIssue({
+      code: "custom",
+      path: ["addressColumn"],
+      message: "Некорректная колонка адреса.",
+    });
+  }
 });
 
 class GeneratedRowsError extends Error {}
@@ -157,7 +170,11 @@ function topicQualityIssues(rows: string[][], headers: string[], examples: unkno
   return [...new Set(issues)];
 }
 
-function validateAndNormalizeRows(sources: GeneratedRowSource[], body: z.infer<typeof bodySchema>) {
+function validateAndNormalizeRows(
+  sources: GeneratedRowSource[],
+  body: z.infer<typeof bodySchema>,
+  assignedAddresses: readonly string[] | null,
+) {
   const allRows = normalizeGeneratedModelRows(sources, body.headers);
   const rows = allRows.slice(0, body.count);
   if (!rows.length || rows.every((row) => row.every((value) => !value))) {
@@ -218,6 +235,9 @@ function validateAndNormalizeRows(sources: GeneratedRowSource[], body: z.infer<t
     phoneColumns.forEach((column) => {
       row[column] = syntheticPhone(body.sequenceStart + index);
     });
+    if (body.addressColumn !== null && assignedAddresses) {
+      row[body.addressColumn] = assignedAddresses[index];
+    }
 
     const key = JSON.stringify(row.map(normalized));
     if (examples.has(key) || uniqueRows.has(key)) normalizationIssues.push("есть строка, совпадающая с другой строкой целиком");
@@ -245,6 +265,12 @@ export async function POST(request: Request) {
   try {
     const config = readAgentConfig(request, "table");
     const body = bodySchema.parse(await request.json());
+    const assignedAddresses = body.addressColumn === null
+      ? null
+      : Array.from({ length: body.count }, (_, index) => {
+          const sequence = body.sequenceStart + index;
+          return formatBogorodskyAddress(selectBogorodskyAddress(sequence), sequence);
+        });
     const columns = body.headers.map((header, index) => ({
       index,
       header,
@@ -302,7 +328,7 @@ export async function POST(request: Request) {
     const first = await generate();
     let firstValidated: ReturnType<typeof validateAndNormalizeRows> | null = null;
     try {
-      firstValidated = validateAndNormalizeRows(first.rows, body);
+      firstValidated = validateAndNormalizeRows(first.rows, body, assignedAddresses);
     } catch (error) {
       if (!(error instanceof GeneratedRowsError)) throw error;
     }
@@ -312,7 +338,7 @@ export async function POST(request: Request) {
     if (!firstValidated || firstValidated.qualityIssues.length) {
       const second = await generate(true);
       try {
-        const secondValidated = validateAndNormalizeRows(second.rows, body);
+        const secondValidated = validateAndNormalizeRows(second.rows, body, assignedAddresses);
         // Prefer the result with fewer quality problems.
         const best =
           firstValidated &&

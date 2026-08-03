@@ -145,4 +145,109 @@ describe("table generator route", () => {
       "сохраняемое-значение", // kept!
     ]);
   });
+
+  it("overwrites a hallucinated model address with an offline catalog address", async () => {
+    vi.spyOn(dns, "lookup").mockResolvedValue([
+      { address: "93.184.216.34", family: 4 },
+    ] as unknown as Awaited<ReturnType<typeof dns.lookup>>);
+    const rows = [{
+      0: "Спокойный текст обращения. Жители просят разобраться.",
+      1: "г. Ногинск, ул. Несуществующая, д. 5",
+    }];
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({ rows }) } }],
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await POST(new Request("http://localhost/api/table/generate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-agent-base-url": "https://api.example.com/v1",
+        "x-agent-api-key": "test",
+        "x-agent-model": "test-model",
+      },
+      body: JSON.stringify({
+        count: 1,
+        headers: ["Текст наказа", "Адрес"],
+        examples: [],
+        formats: {},
+        categoricals: {},
+        fixedValues: {},
+        instruction: "",
+        addressColumn: 1,
+        sequenceStart: 1,
+      }),
+    }));
+
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload.rows[0][1]).not.toContain("Несуществующая");
+    expect(payload.rows[0][1]).toContain("Старая Купавна");
+  });
+
+  it("rejects an address column outside the table", async () => {
+    vi.spyOn(dns, "lookup").mockResolvedValue([
+      { address: "93.184.216.34", family: 4 },
+    ] as unknown as Awaited<ReturnType<typeof dns.lookup>>);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await POST(new Request("http://localhost/api/table/generate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-agent-base-url": "https://api.example.com/v1",
+        "x-agent-api-key": "test",
+        "x-agent-model": "test-model",
+      },
+      body: JSON.stringify({
+        count: 1,
+        headers: ["Текст наказа", "Адрес"],
+        examples: [],
+        formats: {},
+        categoricals: {},
+        fixedValues: {},
+        instruction: "",
+        addressColumn: 2,
+      }),
+    }));
+
+    expect(response.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("preserves model addresses when no address column is mapped", async () => {
+    vi.spyOn(dns, "lookup").mockResolvedValue([
+      { address: "93.184.216.34", family: 4 },
+    ] as unknown as Awaited<ReturnType<typeof dns.lookup>>);
+    const rows = [{ 0: "г. Ногинск, ул. Несуществующая, д. 5" }];
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({ rows }) } }],
+    }), { status: 200 })));
+
+    const response = await POST(new Request("http://localhost/api/table/generate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-agent-base-url": "https://api.example.com/v1",
+        "x-agent-api-key": "test",
+        "x-agent-model": "test-model",
+      },
+      body: JSON.stringify({
+        count: 1,
+        headers: ["Адрес"],
+        examples: [],
+        formats: {},
+        categoricals: {},
+        fixedValues: {},
+        instruction: "",
+      }),
+    }));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      rows: [["г. Ногинск, ул. Несуществующая, д. 5"]],
+    });
+  });
 });
